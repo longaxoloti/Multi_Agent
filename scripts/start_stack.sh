@@ -1,0 +1,29 @@
+#!/bin/bash
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+PROJECT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
+cd "$PROJECT_DIR"
+
+if [ ! -f ".env" ]; then
+  echo "Missing .env file"
+  exit 1
+fi
+
+eval "$(conda shell.bash hook)"
+conda activate agent-stock
+
+mkdir -p data/logs
+
+if [ "${CAMOUFOX_ENABLED:-true}" = "true" ]; then
+  "$PROJECT_DIR/scripts/start_camoufox.sh"
+fi
+
+python main.py > data/logs/bot.log 2>&1 &
+BOT_PID=$!
+echo "$BOT_PID" > data/logs/bot.pid
+
+"$PROJECT_DIR/scripts/start_airflow.sh"
+
+echo "Stack started"
+echo "  Bot PID: $BOT_PID"
