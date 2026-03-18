@@ -5,8 +5,22 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 cd "$PROJECT_DIR"
 
+if [ -f ".env" ]; then
+	while IFS= read -r line || [ -n "$line" ]; do
+		case "$line" in
+			''|'#'*) continue ;;
+		esac
+		key="${line%%=*}"
+		value="${line#*=}"
+		if [[ "$key" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]]; then
+			export "$key=$value"
+		fi
+	done < .env
+fi
+
 CAMOUFOX_API_URL="${CAMOUFOX_API_URL:-http://127.0.0.1:9377}"
 CAMOFOX_PLUGIN_DIR="${CAMOFOX_PLUGIN_DIR:-$HOME/.openclaw/extensions/camofox-browser}"
+MAX_CONCURRENT_PER_USER="${MAX_CONCURRENT_PER_USER:-1}"
 LOG_DIR="$PROJECT_DIR/data/logs"
 PID_FILE="$LOG_DIR/camofox.pid"
 LOG_FILE="$LOG_DIR/camofox.log"
@@ -34,7 +48,7 @@ if [ -f "$PID_FILE" ]; then
 fi
 
 cd "$CAMOFOX_PLUGIN_DIR"
-nohup npm start > "$LOG_FILE" 2>&1 &
+nohup env MAX_CONCURRENT_PER_USER="$MAX_CONCURRENT_PER_USER" npm start > "$LOG_FILE" 2>&1 &
 CAMOFOX_PID=$!
 echo "$CAMOFOX_PID" > "$PID_FILE"
 

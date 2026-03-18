@@ -64,6 +64,10 @@ async def research_node(state: AgentState) -> dict:
             closed = await browser.close_all_tabs()
             if closed:
                 logger.info("Closed %s stale Camoufox tab(s) before new crawl.", closed)
+            
+            # Add delay after closing all tabs to let Camoufox session reset
+            await asyncio.sleep(3)
+            
             crawl_result = await perform_camoufox_direct_crawl(
                 user_text=user_text,
                 topic=research_query,
@@ -222,9 +226,10 @@ async def _generate_search_queries(topic: str, user_text: str) -> list[str]:
         f"Topic: {topic}\n"
         f"User context: {user_text}\n\n"
         "Yêu cầu:\n"
-        "- Trả về 2-3 truy vấn ngắn, cụ thể, không đánh số.\n"
-        "- Mỗi dòng một truy vấn.\n"
-        "- Tập trung truy vấn tin tức/sự kiện mới nhất."
+        "- Chỉ trả về đúng 1 truy vấn duy nhất.\n"
+        "- Truy vấn phải tự nhiên như người dùng thật, không chứa chuỗi máy móc như: site, google, .com, http.\n"
+        "- Không đánh số, không ký hiệu đầu dòng, không giải thích thêm.\n"
+        "- Tập trung vào thông tin mới nhất liên quan trực tiếp tới topic."
     )
     try:
         response = await llm.ainvoke([HumanMessage(content=prompt)])
@@ -234,7 +239,7 @@ async def _generate_search_queries(topic: str, user_text: str) -> list[str]:
             compact = _compact_search_query(candidate)
             if compact and compact not in cleaned:
                 cleaned.append(compact)
-            if len(cleaned) >= RESEARCH_MAX_SEARCH_QUERIES:
+            if len(cleaned) >= 1:
                 break
         if cleaned:
             return cleaned
@@ -346,19 +351,20 @@ def _looks_like_bot_challenge(url: str, snapshot_text: str) -> bool:
 
 
 async def perform_camoufox_direct_crawl(user_text: str, topic: str, browser: CamoufoxBrowser) -> dict:
-    search_queries = await _generate_search_queries(topic=topic, user_text=user_text)
-    logger.info("Research evidence | generated_queries=%s", search_queries)
+    search_queries = (await _generate_search_queries(topic=topic, user_text=user_text))[:1]
+    logger.info("Research evidence | generated_queries=%s max_used=1", search_queries)
 
     context_parts: list[str] = []
     discovered_candidates: list[dict] = []
     seen_urls: set[str] = set()
     bot_detected_count = 0
 
-    for search_query in search_queries:
+    for search_query_idx, search_query in enumerate(search_queries):
         if not await browser.ping():
             logger.warning("Camoufox became unavailable during crawl loop.")
             break
 
+        # Create new tab (each query gets a fresh tab to avoid session conflicts)
         tab_id = await browser.create_tab("https://www.google.com")
         if not tab_id:
             logger.warning("Camoufox create_tab failed for query: %s", search_query)
@@ -369,7 +375,12 @@ async def perform_camoufox_direct_crawl(user_text: str, topic: str, browser: Cam
                 logger.warning("Camoufox search_google failed for query: %s", search_query)
                 continue
 
-            await asyncio.sleep(6)
+            # Increase delay on each consecutive query to reduce bot-detect risk
+            # Query 1: 8s, Query 2: 16s, etc (exponential backoff)
+            delay = 10 * (2 ** search_query_idx)
+            logger.info("Research evidence | waiting %.0fs before snapshot (query %d/%d serial_mode=true)", delay, search_query_idx + 1, len(search_queries))
+            await asyncio.sleep(delay)
+            
             first_page = await browser.get_snapshot_page(tab_id)
             if not first_page:
                 logger.warning("No snapshot data from Camoufox for query: %s", search_query)
@@ -423,14 +434,15 @@ async def perform_camoufox_direct_crawl(user_text: str, topic: str, browser: Cam
             )
 
             for ref_id in selected_refs:
-                if not await browser.search_google(tab_id, search_query):
-                    continue
-                await asyncio.sleep(3)
+                # Don't re-search for each ref - we're clicking refs from current search page
+                await asyncio.sleep(5)  # Wait between clicks
                 if not await browser.click(tab_id, ref_id):
                     continue
-                await asyncio.sleep(4)
+                await asyncio.sleep(6)  # Wait for page to load after click
                 landed_page = await browser.get_snapshot_page(tab_id)
                 if not landed_page:
+                    # If click failed to navigate, go back to search results
+                    await asyncio.sleep(3)
                     continue
 
                 landed_url = str(landed_page.get("url") or "")

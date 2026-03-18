@@ -10,6 +10,17 @@ if [ ! -f ".env" ]; then
   exit 1
 fi
 
+while IFS= read -r line || [ -n "$line" ]; do
+  case "$line" in
+    ''|'#'*) continue ;;
+  esac
+  key="${line%%=*}"
+  value="${line#*=}"
+  if [[ "$key" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]]; then
+    export "$key=$value"
+  fi
+done < .env
+
 eval "$(conda shell.bash hook)"
 conda activate agent-stock
 
