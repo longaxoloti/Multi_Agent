@@ -1,4 +1,4 @@
-# Multi Agent 🔌⚡
+# Multi Agent
 
 **A self-hosted, multi-model AI agent system built with LangGraph — designed to run entirely on local hardware via Ollama, with optional cloud LLM fallback.**
 
@@ -35,21 +35,17 @@ This project builds an autonomous agent that receives messages through Telegram,
 
 ```bash
 git clone https://github.com/longaxoloti/Multi_Agent.git
-cd agent
+cd Multi_Agent
 ```
 
 ### 2. Create the Conda Environment
 
 ```bash
 conda env create -f environment.yml
-conda activate agent-stock
+conda activate multi-agent
 ```
 
 ### 3. Configure Environment Variables
-
-```bash
-cp .env.example .env
-```
 
 Edit `.env` and fill in:
 - `TELEGRAM_BOT_TOKEN` — Your Telegram bot token from [@BotFather](https://t.me/BotFather)
@@ -76,10 +72,6 @@ Open Telegram, find your bot, and send `/start`.
 
 ---
 
-## Configuration
-
-All configuration is managed through environment variables in `.env`. See `.env.example` for the full list with descriptions.
-
 ### Model Routing
 
 You can override which provider handles each task type:
@@ -92,18 +84,12 @@ MODEL_CHAT          # Direct chat
 MODEL_ORCHESTRATOR
 ```
 
-Set any of these to `gemini`, `openai`, `anthropic`, or `deepseek` to use a cloud provider instead.
+Set any of these to `gemini`, `openai`, `anthropic`, or `ollama` if you want to self-host.
 
 ---
 
-## 🧪 Health Check
+## Health Check
 
 ```bash
 python scripts/health_check.py
 ```
-
----
-
-## 📄 License
-
-This project is provided as-is for educational and personal use.
