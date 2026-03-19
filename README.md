@@ -105,5 +105,6 @@ Set any of these to `gemini`, `openai`, `anthropic`, or `ollama` if you want to 
 ## Health Check
 
 ```bash
-python scripts/health_check.py
+# Prestart validation (env + provider routes + Ollama models)
+python scripts/health_check.py --prestart
 ```

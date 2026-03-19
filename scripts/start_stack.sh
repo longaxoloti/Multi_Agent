@@ -30,7 +30,7 @@ if [ "${CAMOUFOX_ENABLED:-true}" = "true" ]; then
   "$PROJECT_DIR/scripts/start_camoufox.sh"
 fi
 
-python main/main.py > data/logs/bot.log 2>&1 &
+python -m main.main > data/logs/bot.log 2>&1 &
 BOT_PID=$!
 echo "$BOT_PID" > data/logs/bot.pid
 

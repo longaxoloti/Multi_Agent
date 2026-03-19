@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 import os
 import signal
+import subprocess
 import sys
 from pathlib import Path
 from typing import Any
@@ -12,6 +13,10 @@ from urllib.request import Request, urlopen
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
+
+from dotenv import load_dotenv
+
+load_dotenv(PROJECT_ROOT / ".env")
 
 
 def is_pid_alive(pid: int) -> bool:
@@ -66,7 +71,109 @@ def http_health(url: str) -> dict[str, Any]:
         return {"reachable": False, "error": str(exc)}
 
 
-def main() -> int:
+def get_ollama_models() -> dict[str, Any]:
+    try:
+        proc = subprocess.run(
+            ["ollama", "list"],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=15,
+        )
+    except Exception as exc:
+        return {"ok": False, "error": f"failed to execute ollama list: {exc}", "models": []}
+
+    if proc.returncode != 0:
+        return {
+            "ok": False,
+            "error": (proc.stderr or proc.stdout).strip() or f"ollama list exited with {proc.returncode}",
+            "models": [],
+        }
+
+    lines = [line for line in proc.stdout.splitlines() if line.strip()]
+    if not lines:
+        return {"ok": True, "error": "", "models": []}
+
+    model_names: list[str] = []
+    for line in lines[1:]:
+        parts = line.split()
+        if parts:
+            model_names.append(parts[0])
+    return {"ok": True, "error": "", "models": model_names}
+
+
+def prestart_health() -> tuple[dict[str, Any], int]:
+    from main.config import (
+        OLLAMA_BASE_URL,
+        OLLAMA_ENABLED,
+        OLLAMA_MODEL,
+        OLLAMA_CLASSIFIER_MODEL,
+        OLLAMA_ORCHESTRATOR_MODEL,
+        OLLAMA_RESEARCH_MODEL,
+        OLLAMA_CODER_MODEL,
+    )
+
+    providers = {
+        "fast": os.getenv("MODEL_FAST", "ollama").strip().lower(),
+        "research": os.getenv("MODEL_RESEARCH", "ollama").strip().lower(),
+        "analysis": os.getenv("MODEL_ANALYSIS", "ollama").strip().lower(),
+        "chat": os.getenv("MODEL_CHAT", "ollama").strip().lower(),
+        "code": os.getenv("MODEL_CODE", "ollama").strip().lower(),
+        "orchestrator": os.getenv("MODEL_ORCHESTRATOR", "ollama").strip().lower(),
+    }
+
+    task_model_map = {
+        "fast": OLLAMA_CLASSIFIER_MODEL,
+        "research": OLLAMA_RESEARCH_MODEL,
+        "analysis": OLLAMA_RESEARCH_MODEL,
+        "chat": OLLAMA_ORCHESTRATOR_MODEL,
+        "code": OLLAMA_CODER_MODEL,
+        "orchestrator": OLLAMA_ORCHESTRATOR_MODEL,
+    }
+
+    required_ollama_models = sorted(
+        {
+            task_model_map[task]
+            for task, provider in providers.items()
+            if provider == "ollama"
+        }
+        | ({OLLAMA_MODEL} if OLLAMA_ENABLED else set())
+    )
+
+    ollama_api = http_health(f"{OLLAMA_BASE_URL.rstrip('/')}/api/tags")
+    ollama_list = get_ollama_models() if OLLAMA_ENABLED else {"ok": True, "models": [], "error": ""}
+    installed_set = set(ollama_list.get("models", []))
+    missing_models = [m for m in required_ollama_models if m not in installed_set]
+
+    telegram_ok = bool(os.getenv("TELEGRAM_BOT_TOKEN", "").strip())
+
+    status = {
+        "mode": "prestart",
+        "providers": providers,
+        "telegram_token_present": telegram_ok,
+        "ollama_enabled": OLLAMA_ENABLED,
+        "ollama_base_url": OLLAMA_BASE_URL,
+        "ollama_api": ollama_api,
+        "ollama_list": ollama_list,
+        "required_ollama_models": required_ollama_models,
+        "missing_ollama_models": missing_models,
+        "suggested_pull_commands": [f"ollama pull {m}" for m in missing_models],
+    }
+
+    is_ok = True
+    if not telegram_ok:
+        is_ok = False
+    if OLLAMA_ENABLED and not ollama_api.get("reachable", False):
+        is_ok = False
+    if OLLAMA_ENABLED and (not ollama_list.get("ok", False)):
+        is_ok = False
+    if missing_models:
+        is_ok = False
+
+    return status, (0 if is_ok else 1)
+
+
+def runtime_health() -> tuple[dict[str, Any], int]:
     data_logs = PROJECT_ROOT / "data" / "logs"
     airflow_home = Path(os.getenv("AIRFLOW_HOME", str(PROJECT_ROOT / "airflow_home")))
 
@@ -78,6 +185,7 @@ def main() -> int:
     camofox_api = http_health(f"{camofox_api_url.rstrip('/')}/health")
 
     status = {
+        "mode": "runtime",
         "bot": bot,
         "airflow_webserver": airflow_web,
         "airflow_scheduler": airflow_sched,
@@ -85,12 +193,33 @@ def main() -> int:
         "camofox_api": camofox_api,
     }
 
-    print(json.dumps(status, indent=2))
+    mandatory = [
+        bot.get("alive", False),
+        airflow_web.get("alive", False),
+        airflow_sched.get("alive", False),
+    ]
+    return status, (0 if all(mandatory) else 1)
 
-    mandatory = [bot.get("alive", False), airflow_web.get("alive", False), airflow_sched.get("alive", False)]
-    if all(mandatory):
-        return 0
-    return 1
+
+def main() -> int:
+    mode = "runtime"
+    if len(sys.argv) > 1:
+        arg = sys.argv[1].strip().lower()
+        if arg in {"--prestart", "prestart"}:
+            mode = "prestart"
+        elif arg in {"--runtime", "runtime"}:
+            mode = "runtime"
+        else:
+            print("Usage: python scripts/health_check.py [--prestart|--runtime]")
+            return 2
+
+    if mode == "prestart":
+        status, code = prestart_health()
+    else:
+        status, code = runtime_health()
+
+    print(json.dumps(status, indent=2))
+    return code
 
 
 if __name__ == "__main__":

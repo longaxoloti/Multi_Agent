@@ -66,7 +66,7 @@ acquire_bot_lock() {
 if [ "$MODE" = "bot" ]; then
     # Launch via Python wrapper
     acquire_bot_lock || exit 1
-    python main/main.py
+    python -m main.main
 elif [ "$MODE" = "airflow" ]; then
     ./scripts/start_airflow.sh
 elif [ "$MODE" = "stack" ]; then
