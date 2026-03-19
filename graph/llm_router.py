@@ -4,7 +4,7 @@ from typing import Optional
 import os
 from langchain_ollama import ChatOllama
 
-from config import (
+from main.config import (
     GEMINI_API_KEY,
     GEMINI_MODEL,
     OLLAMA_ENABLED,

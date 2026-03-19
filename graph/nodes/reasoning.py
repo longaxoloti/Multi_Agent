@@ -2,7 +2,7 @@ import logging
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 from graph.state import AgentState
 from graph.llm_router import get_llm
-from config import (
+from main.config import (
     OLLAMA_ORCHESTRATOR_MODEL,
     OLLAMA_RESEARCH_MODEL,
 )

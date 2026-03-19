@@ -4,7 +4,7 @@ import re
 
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 
-from config import OLLAMA_CLASSIFIER_MODEL, OLLAMA_ORCHESTRATOR_MODEL
+from main.config import OLLAMA_CLASSIFIER_MODEL, OLLAMA_ORCHESTRATOR_MODEL
 from graph.state import AgentState
 from graph.llm_router import get_llm
 from tools.ollama_manager import clear_context, save_context, unload_model

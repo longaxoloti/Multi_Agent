@@ -6,7 +6,7 @@ from typing import Optional
 import chromadb
 from chromadb.config import Settings
 
-from config import MEMORY_DIR, CHROMA_COLLECTION_NAME, MAX_CONVERSATION_HISTORY
+from main.config import MEMORY_DIR, CHROMA_COLLECTION_NAME, MAX_CONVERSATION_HISTORY
 from rag.chunking import build_document_chunks
 
 logger = logging.getLogger(__name__)

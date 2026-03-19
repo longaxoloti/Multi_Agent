@@ -1,6 +1,6 @@
 import logging
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
-from config import OLLAMA_ORCHESTRATOR_MODEL
+from main.config import OLLAMA_ORCHESTRATOR_MODEL
 from graph.state import AgentState
 from graph.llm_router import get_llm
 from tools.ollama_manager import clear_context, load_context, unload_model

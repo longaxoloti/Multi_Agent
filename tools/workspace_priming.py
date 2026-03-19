@@ -3,7 +3,7 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Literal
 
-from config import (
+from main.config import (
     WORKSPACE_DIR,
     WORKSPACE_PRIMING_ENABLED,
     WORKSPACE_PRIMING_FILE_SETS,
@@ -25,12 +25,6 @@ def _read_markdown(path: Path) -> str:
 
 @lru_cache(maxsize=8)
 def get_workspace_priming_context(model_role: ModelRole = "orchestrator") -> str:
-    """Load and cache the workspace priming context for a specific model role.
-
-    Each role maps to a distinct list of markdown files defined in
-    ``WORKSPACE_PRIMING_FILE_SETS`` (from config.py). Files are loaded once
-    per process per role and cached by the LRU cache.
-    """
     if not WORKSPACE_PRIMING_ENABLED:
         return ""
 

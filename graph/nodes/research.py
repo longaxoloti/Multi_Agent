@@ -6,7 +6,7 @@ from tools.crawl4ai_client import crawl_url_to_markdown
 from langchain_core.messages import HumanMessage, SystemMessage
 from graph.state import AgentState
 from graph.llm_router import get_llm
-from config import (
+from main.config import (
     CAMOUFOX_ENABLED,
     CAMOUFOX_API_URL,
     RESEARCH_MAX_SEARCH_QUERIES,

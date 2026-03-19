@@ -1,30 +1,11 @@
 #!/usr/bin/env python3
-"""
-Login Helper — Set up authenticated sessions for the agent.
-
-Launches an interactive login flow for the configured auth backend.
-
-- nodriver backend: opens per-site login pages and saves cookies.
-- playwright backend: opens persistent Chromium profile as before.
-
-Usage:
-    conda run -n agent-stock python scripts/login_helper.py
-
-Then:
-    1. Chrome opens with Google loaded
-    2. Navigate to any site (x.com, gemini.google.com, etc.)
-    3. Log in manually
-    4. Press Enter in the terminal when done
-    5. Sessions are saved — the bot will reuse them automatically
-"""
-
 import asyncio
 import sys
 import os
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from config import AUTH_BROWSER_BACKEND
+from main.config import AUTH_BROWSER_BACKEND
 from tools.playwright_browser import PlaywrightBrowserAutomation
 from tools.nodriver_browser import login_interactive
 

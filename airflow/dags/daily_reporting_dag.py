@@ -3,7 +3,7 @@ import os
 import sys
 from datetime import datetime, timedelta
 import requests
-from config import TELEGRAM_BOT_TOKEN, TELEGRAM_USER_ID
+from main.config import TELEGRAM_BOT_TOKEN, TELEGRAM_USER_ID
 
 from airflow.decorators import dag, task
 from airflow.operators.python import get_current_context
@@ -12,7 +12,7 @@ PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..
 if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
 
-from config import (
+from main.config import (
     AIRFLOW_DAILY_REPORT_CRON,
     AIRFLOW_REPORT_CATCHUP,
     AIRFLOW_REPORT_CHAT_ID,
