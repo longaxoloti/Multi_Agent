@@ -13,7 +13,7 @@ from typing import Optional
 from sqlalchemy import DateTime, Float, Integer, String, Text, create_engine, inspect, select, text
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, sessionmaker
 
-from config import (
+from main.config import (
     EMBEDDING_MODEL,
     GEMINI_API_KEY,
     TRUSTED_CLAIM_ENABLE_SEMANTIC_DEDUPE,

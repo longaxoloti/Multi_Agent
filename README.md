@@ -57,14 +57,28 @@ Edit `.env` and fill in:
 
 ```bash
 # Start the Telegram bot (default mode)
-./run.sh
+./main/run.sh
 
 # Or start the full stack (bot + Airflow + crawler)
-./run.sh stack
+./main/run.sh stack
 
 # Or start only Airflow scheduler
-./run.sh airflow
+./main/run.sh airflow
 ```
+
+### 4.1 Run with Docker
+
+```bash
+cp .env.example .env  # or create .env manually if you do not have .env.example
+
+# Build and start bot + Postgres
+docker compose up -d --build
+
+# Follow logs
+docker compose logs -f multi-agent
+```
+
+Default container command runs the Telegram bot via `python -m main.main`.
 
 ### 5. Talk to Your Agent
 

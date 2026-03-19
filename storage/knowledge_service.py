@@ -4,7 +4,7 @@ import re
 from dataclasses import dataclass
 from typing import Optional
 
-from config import (
+from main.config import (
     KNOWLEDGE_ALLOW_NATURAL_LANGUAGE_COMMANDS,
     KNOWLEDGE_DB_ENABLED,
     KNOWLEDGE_DB_REQUIRED,

@@ -7,7 +7,6 @@ config.py
 
 # Data directories
 data/
-storage/
 tests/
 
 # Python
@@ -33,3 +32,13 @@ airflow_home/
 airflow.db
 airflow-webserver.pid
 logs/
+
+# Custom markdown
+AGENTS.md
+BOOTSTRAP.md
+HEARTBEAT.md
+IDENTITY.md
+MODELS.md
+SOUL.md
+TOOLS.md
+USER.md

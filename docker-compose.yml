@@ -1,0 +1,39 @@
+services:
+  multi-agent:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: multi-agent
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      OLLAMA_BASE_URL: ${OLLAMA_BASE_URL:-http://host.docker.internal:11434}
+      TRUSTED_DB_URL: ${TRUSTED_DB_URL:-postgresql+psycopg://agent:agent@postgres:5432/agent_ai}
+    volumes:
+      - ./data:/app/data
+      - ./workspace:/app/workspace
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  postgres:
+    image: postgres:16
+    container_name: multi-agent-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: agent_ai
+      POSTGRES_USER: agent
+      POSTGRES_PASSWORD: agent
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U agent -d agent_ai"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  postgres_data:
