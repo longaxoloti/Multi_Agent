@@ -1,7 +1,10 @@
 import asyncio
 import sys
 import logging
+import os
 from langchain_core.messages import HumanMessage
+
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from graph.workflow import build_workflow
 
 CASES = {

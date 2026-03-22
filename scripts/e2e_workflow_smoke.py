@@ -1,4 +1,8 @@
 import asyncio
+import os
+import sys
+
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from langchain_core.messages import HumanMessage
 from graph.workflow import build_workflow
 
@@ -20,7 +24,7 @@ def base_state(text: str):
         "memory_context": "",
         "verification_summary": "",
         "chat_id": "e2e_test",
-        "session_id": "",
+        "session_id": "e2e_test_session",
         "active_model": "",
     }
 

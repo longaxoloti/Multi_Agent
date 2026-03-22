@@ -19,6 +19,7 @@ kill_if_running() {
 
 kill_if_running data/logs/bot.pid
 kill_if_running data/logs/camofox.pid
+kill_if_running data/logs/camofox_mcp.pid
 
 "$PROJECT_DIR/scripts/stop_airflow.sh"
 

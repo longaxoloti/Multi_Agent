@@ -11,9 +11,7 @@ from main.config import (
 )
 
 logger = logging.getLogger(__name__)
-
 ModelRole = Literal["orchestrator", "classifier", "researcher", "coder"]
-
 
 def _read_markdown(path: Path) -> str:
     try:

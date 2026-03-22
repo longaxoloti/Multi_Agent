@@ -104,17 +104,19 @@ def get_ollama_models() -> dict[str, Any]:
 
 def prestart_health() -> tuple[dict[str, Any], int]:
     from main.config import (
+        CAMOFOX_API_KEY,
+        CAMOFOX_AUTH_REQUIRED,
+        CAMOFOX_BLOCK_REMOTE,
+        CAMOFOX_MCP_TRANSPORT,
+        CAMOFOX_REQUIRE_HTTPS_REMOTE,
         OLLAMA_BASE_URL,
         OLLAMA_ENABLED,
-        OLLAMA_MODEL,
-        OLLAMA_CLASSIFIER_MODEL,
         OLLAMA_ORCHESTRATOR_MODEL,
         OLLAMA_RESEARCH_MODEL,
         OLLAMA_CODER_MODEL,
     )
 
     providers = {
-        "fast": os.getenv("MODEL_FAST", "ollama").strip().lower(),
         "research": os.getenv("MODEL_RESEARCH", "ollama").strip().lower(),
         "analysis": os.getenv("MODEL_ANALYSIS", "ollama").strip().lower(),
         "chat": os.getenv("MODEL_CHAT", "ollama").strip().lower(),
@@ -123,7 +125,6 @@ def prestart_health() -> tuple[dict[str, Any], int]:
     }
 
     task_model_map = {
-        "fast": OLLAMA_CLASSIFIER_MODEL,
         "research": OLLAMA_RESEARCH_MODEL,
         "analysis": OLLAMA_RESEARCH_MODEL,
         "chat": OLLAMA_ORCHESTRATOR_MODEL,
@@ -137,7 +138,6 @@ def prestart_health() -> tuple[dict[str, Any], int]:
             for task, provider in providers.items()
             if provider == "ollama"
         }
-        | ({OLLAMA_MODEL} if OLLAMA_ENABLED else set())
     )
 
     ollama_api = http_health(f"{OLLAMA_BASE_URL.rstrip('/')}/api/tags")
@@ -149,6 +149,13 @@ def prestart_health() -> tuple[dict[str, Any], int]:
 
     status = {
         "mode": "prestart",
+        "camofox_auth_policy": {
+            "auth_required": CAMOFOX_AUTH_REQUIRED,
+            "api_key_present": bool((CAMOFOX_API_KEY or "").strip()),
+            "block_remote": CAMOFOX_BLOCK_REMOTE,
+            "require_https_remote": CAMOFOX_REQUIRE_HTTPS_REMOTE,
+            "mcp_transport": CAMOFOX_MCP_TRANSPORT,
+        },
         "providers": providers,
         "telegram_token_present": telegram_ok,
         "ollama_enabled": OLLAMA_ENABLED,
@@ -162,6 +169,8 @@ def prestart_health() -> tuple[dict[str, Any], int]:
 
     is_ok = True
     if not telegram_ok:
+        is_ok = False
+    if CAMOFOX_AUTH_REQUIRED and not (CAMOFOX_API_KEY or "").strip():
         is_ok = False
     if OLLAMA_ENABLED and not ollama_api.get("reachable", False):
         is_ok = False
@@ -181,8 +190,15 @@ def runtime_health() -> tuple[dict[str, Any], int]:
     airflow_web = read_pid_status(airflow_home / "webserver.pid")
     airflow_sched = read_pid_status(airflow_home / "scheduler.pid")
     airflow_api = airflow_health()
-    camofox_api_url = os.getenv("CAMOUFOX_API_URL", "http://127.0.0.1:9377")
+    camofox_api_url = os.getenv("CAMOFOX_URL", os.getenv("CAMOUFOX_API_URL", "http://127.0.0.1:9377"))
     camofox_api = http_health(f"{camofox_api_url.rstrip('/')}/health")
+    camofox_mcp_transport = os.getenv("CAMOFOX_MCP_TRANSPORT", "stdio").strip().lower()
+    camofox_mcp_url = os.getenv("CAMOFOX_MCP_URL", "http://127.0.0.1:3000/mcp")
+    camofox_mcp_api = (
+        http_health(camofox_mcp_url)
+        if camofox_mcp_transport == "http"
+        else {"skipped": True, "reason": "transport=stdio"}
+    )
 
     status = {
         "mode": "runtime",
@@ -191,6 +207,8 @@ def runtime_health() -> tuple[dict[str, Any], int]:
         "airflow_scheduler": airflow_sched,
         "airflow_api": airflow_api,
         "camofox_api": camofox_api,
+        "camofox_mcp_transport": camofox_mcp_transport,
+        "camofox_mcp_api": camofox_mcp_api,
     }
 
     mandatory = [

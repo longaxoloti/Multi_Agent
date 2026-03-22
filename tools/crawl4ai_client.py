@@ -1,7 +1,10 @@
 import asyncio
 import logging
+import os
 from typing import Optional
 logger = logging.getLogger(__name__)
+
+DEBUG_CRAWL4AI = os.getenv("DEBUG_RESEARCH", "").lower() in {"1", "true", "yes"}
 
 try:
     from crawl4ai import AsyncWebCrawler
@@ -12,7 +15,7 @@ try:
 except ImportError:
     _CRAWL4AI_AVAILABLE = False
     logger.warning(
-        "crawl4ai is not installed. Article crawling via Crawl4AI will be disabled. "
+        "crawl4ai is not installed. Article crawling via Crawl4AI will be disabled."
         "Run: pip install crawl4ai && crawl4ai-setup"
     )
 from main.config import CRAWL4AI_ENABLED
@@ -65,6 +68,8 @@ async def crawl_url_to_markdown(url: str) -> str:
                 "Crawl4AI failed for %s: status=%s err=%s",
                 url, result.status_code, result.error_message
             )
+            if DEBUG_CRAWL4AI:
+                logger.info("[DEBUG_CRAWL4AI] FAILED url=%s status=%s error=%s", url, result.status_code, result.error_message)
             return ""
 
         fit = (result.markdown.fit_markdown or "").strip()
@@ -73,12 +78,17 @@ async def crawl_url_to_markdown(url: str) -> str:
 
         if not content:
             logger.debug("Crawl4AI returned empty content for %s", url)
+            if DEBUG_CRAWL4AI:
+                logger.info("[DEBUG_CRAWL4AI] EMPTY url=%s fit_len=%d raw_len=%d", url, len(fit), len(raw))
             return ""
 
         logger.info(
             "Crawl4AI crawled %s — fit=%d chars, raw=%d chars, using=%s",
             url, len(fit), len(raw), "fit" if content is fit else "raw",
         )
+        if DEBUG_CRAWL4AI:
+            logger.info("[DEBUG_CRAWL4AI] SUCCESS url=%s fit_len=%d raw_len=%d content_len=%d", url, len(fit), len(raw), len(content))
+            logger.info("[DEBUG_CRAWL4AI] CONTENT_SAMPLE url=%s first_500=%s", url, content[:500])
         return content[:_ARTICLE_CHAR_LIMIT]
 
     except asyncio.TimeoutError:

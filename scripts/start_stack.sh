@@ -27,6 +27,7 @@ conda activate agent-stock
 mkdir -p data/logs
 
 if [ "${CAMOUFOX_ENABLED:-true}" = "true" ]; then
+  echo "Camoufox mode: CAMOFOX_MCP_TRANSPORT=${CAMOFOX_MCP_TRANSPORT:-stdio}"
   "$PROJECT_DIR/scripts/start_camoufox.sh"
 fi
 
