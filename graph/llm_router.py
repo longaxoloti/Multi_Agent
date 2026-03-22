@@ -9,9 +9,7 @@ from main.config import (
     GEMINI_MODEL,
     OLLAMA_ENABLED,
     OLLAMA_BASE_URL,
-    OLLAMA_MODEL,
     OLLAMA_ORCHESTRATOR_MODEL,
-    OLLAMA_CLASSIFIER_MODEL,
     OLLAMA_RESEARCH_MODEL,
     OLLAMA_CODER_MODEL,
 )
@@ -29,10 +27,8 @@ logger = logging.getLogger(__name__)
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
-DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY", "")
 
 MODEL_ROUTING = {
-    "fast": os.getenv("MODEL_FAST", "ollama"),
     "research": os.getenv("MODEL_RESEARCH", "ollama"),
     "analysis": os.getenv("MODEL_ANALYSIS", "ollama"),
     "chat": os.getenv("MODEL_CHAT", "ollama"),
@@ -41,7 +37,6 @@ MODEL_ROUTING = {
 }
 
 _OLLAMA_TASK_MODEL: dict[str, str] = {
-    "fast": OLLAMA_CLASSIFIER_MODEL,
     "orchestrator": OLLAMA_ORCHESTRATOR_MODEL,
     "chat": OLLAMA_ORCHESTRATOR_MODEL,
     "research": OLLAMA_RESEARCH_MODEL,
@@ -53,7 +48,7 @@ def _build_ollama(temperature: float = 0.7, model_override: Optional[str] = None
     if not OLLAMA_ENABLED:
         return None
     try:
-        model = model_override or OLLAMA_MODEL
+        model = model_override or OLLAMA_ORCHESTRATOR_MODEL
         return ChatOllama(
             model=model,
             base_url=OLLAMA_BASE_URL,
@@ -104,27 +99,11 @@ def _build_anthropic(temperature: float = 0.7):
         logger.warning("Failed to init Anthropic: %s", e)
         return None
 
-def _build_deepseek(temperature: float = 0.7):
-    if not DEEPSEEK_API_KEY:
-        return None
-    try:
-        from langchain_openai import ChatOpenAI
-        return ChatOpenAI(
-            model="deepseek-chat",
-            api_key=DEEPSEEK_API_KEY,
-            base_url="https://api.deepseek.com",
-            temperature=temperature,
-        )
-    except Exception as e:
-        logger.warning("Failed to init DeepSeek: %s", e)
-        return None
-
 _PROVIDERS = {
     "ollama": _build_ollama,
     "gemini": _build_gemini,
     "openai": _build_openai,
     "anthropic": _build_anthropic,
-    "deepseek": _build_deepseek,
 }
 
 def get_llm(
@@ -134,7 +113,7 @@ def get_llm(
     model_override: Optional[str] = None,
 ):
     preferred = MODEL_ROUTING.get(task_type, "ollama")
-    resolved_ollama_model = model_override or _OLLAMA_TASK_MODEL.get(task_type, OLLAMA_MODEL)
+    resolved_ollama_model = model_override or _OLLAMA_TASK_MODEL.get(task_type, OLLAMA_ORCHESTRATOR_MODEL)
     if preferred == "ollama":
         llm = _build_ollama(temperature, model_override=resolved_ollama_model)
         if llm:
@@ -150,7 +129,7 @@ def get_llm(
                 logger.debug("Using %s for task_type=%s", preferred, task_type)
                 return llm
 
-    fallback_order = ["ollama", "gemini", "openai", "anthropic", "deepseek"]
+    fallback_order = ["ollama", "gemini", "openai", "anthropic"]
     for name in fallback_order:
         if name == preferred:
             continue
@@ -182,6 +161,4 @@ def get_available_providers() -> list[str]:
         available.append("openai")
     if ANTHROPIC_API_KEY and _module_available("langchain_anthropic"):
         available.append("anthropic")
-    if DEEPSEEK_API_KEY and _module_available("langchain_openai"):
-        available.append("deepseek")
     return available

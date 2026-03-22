@@ -3,28 +3,32 @@ from typing import Annotated, TypedDict
 from langchain_core.messages import BaseMessage
 
 
+class PlanStep(TypedDict):
+    worker: str  # RESEARCH | CODING | REASONING | BRIEFING
+    tasks: list[str]
+    step_goal: str
+
+
 class AgentState(TypedDict):
-    # ── Conversation history (append-only) ───────────────────────────────
     messages: Annotated[list[BaseMessage], operator.add]
+    chat_id: str
+    session_id: str
+    intent: str
+    topic: str
+    search_query: str
 
-    # ── Session / routing ─────────────────────────────────────────────────
-    chat_id: str          # Telegram chat ID (or any session identifier)
-    session_id: str       # Used as key for temp context JSON files
+    # Orchestrator output
+    phase: str
+    plan_steps: list[PlanStep]
+    current_step_index: int
+    tasks: list[str]
+    routing_decision: str
+    knowledge_action: str
 
-    # ── Classifier output ─────────────────────────────────────────────────
-    intent: str           # RESEARCH | CODING | REASONING | CHAT | BRIEFING
-    topic: str            # Main subject/topic extracted by the classifier
+    # Worker results
+    task_results: Annotated[list[dict], operator.add]
+    active_model: str
 
-    # ── Orchestrator output ───────────────────────────────────────────────
-    tasks: list[str]      # Ordered task list produced by the Orchestrator
-    routing_decision: str # Which worker to call: RESEARCH | CODING | REASONING | CHAT
-    knowledge_action: str # handled | none
-
-    # ── Worker results ────────────────────────────────────────────────────
-    task_results: list[dict]  # [{model, result, sources}, ...]
-    active_model: str          # Name of the last Ollama model used (for unloading)
-
-    # ── Legacy / compatibility ─────────────────────────────────────────────
+    # Legacy / compatibility
     memory_context: str
     verification_summary: str
-

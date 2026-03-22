@@ -26,6 +26,7 @@ async def coding_node(state: AgentState) -> dict:
     user_text = ctx.get("user_message", "")
     tasks = ctx.get("tasks", state.get("tasks", []))
     topic = ctx.get("topic", state.get("topic", ""))
+    step_index = ctx.get("step_index", 0)
 
     task_description = "\n".join(f"{i + 1}. {t}" for i, t in enumerate(tasks))
     user_prompt = (
@@ -49,6 +50,7 @@ async def coding_node(state: AgentState) -> dict:
     sources = list(dict.fromkeys(file_refs))
 
     task_result = {
+        "step_index": step_index,
         "model": OLLAMA_CODER_MODEL,
         "result": result_text,
         "sources": sources,

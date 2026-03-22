@@ -7,7 +7,7 @@ from main.config import (
     OLLAMA_RESEARCH_MODEL,
 )
 from tools.workspace_priming import build_system_prompt
-from tools.ollama_manager import unload_model, load_context, clear_context
+from tools.ollama_manager import unload_model, load_context
 
 logger = logging.getLogger(__name__)
 
@@ -33,9 +33,10 @@ async def reasoning_node(state: AgentState) -> dict:
     logger.info("Routing to REASONING path (%s)", OLLAMA_RESEARCH_MODEL)
     await unload_model(OLLAMA_ORCHESTRATOR_MODEL)
 
-    task_description = "\n".join(
-        f"{i + 1}. {t}" for i, t in enumerate(state.get("tasks", []))
-    )
+    tasks = ctx.get("tasks", state.get("tasks", [])) or []
+    step_index = ctx.get("step_index", 0)
+
+    task_description = "\n".join(f"{i + 1}. {t}" for i, t in enumerate(tasks))
     prompt = (
         f"Tasks:\n{task_description}\n\nUser message:\n{user_text}"
         if task_description
@@ -51,9 +52,15 @@ async def reasoning_node(state: AgentState) -> dict:
         logger.error(f"Error in reasoning node: {e}", exc_info=True)
         response = AIMessage(content="Sorry, I encountered an error while reasoning.")
 
-    clear_context(session_id)
+    result_text = (response.content or "").strip()
+    task_result = {
+        "step_index": step_index,
+        "model": OLLAMA_RESEARCH_MODEL,
+        "result": result_text,
+        "sources": [],
+    }
 
     return {
-        "messages": [response],
+        "task_results": [task_result],
         "active_model": OLLAMA_RESEARCH_MODEL,
     }
