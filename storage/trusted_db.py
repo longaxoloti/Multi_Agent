@@ -3,7 +3,6 @@ from __future__ import annotations
 import difflib
 import json
 import logging
-import math
 import re
 import uuid
 from dataclasses import dataclass
@@ -14,11 +13,6 @@ from sqlalchemy import DateTime, Float, Integer, String, Text, create_engine, in
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, sessionmaker
 
 from main.config import (
-    EMBEDDING_MODEL,
-    GEMINI_API_KEY,
-    TRUSTED_CLAIM_ENABLE_SEMANTIC_DEDUPE,
-    TRUSTED_CLAIM_SEMANTIC_SIMILARITY_THRESHOLD,
-    TRUSTED_CLAIM_SIMILARITY_THRESHOLD,
     TRUSTED_DB_URL,
 )
 
@@ -85,20 +79,6 @@ class TrustedDBRepository:
         self.db_url = db_url or TRUSTED_DB_URL
         self.engine = create_engine(self.db_url, future=True, pool_pre_ping=True)
         self._session_factory = sessionmaker(bind=self.engine, expire_on_commit=False, future=True)
-        self._embedding_client = None
-        self._semantic_enabled = TRUSTED_CLAIM_ENABLE_SEMANTIC_DEDUPE and bool(GEMINI_API_KEY)
-
-        if self._semantic_enabled:
-            try:
-                from langchain_google_genai import GoogleGenerativeAIEmbeddings
-
-                self._embedding_client = GoogleGenerativeAIEmbeddings(
-                    model=EMBEDDING_MODEL,
-                    google_api_key=GEMINI_API_KEY,
-                )
-            except Exception as exc:
-                logger.warning("Semantic dedupe disabled (embedding client init failed): %s", exc)
-                self._semantic_enabled = False
 
     def initialize(self) -> None:
         Base.metadata.create_all(self.engine)
@@ -148,29 +128,6 @@ class TrustedDBRepository:
                     logger.warning("Unsupported dialect for embedding column migration: %s", dialect)
                     return
 
-    def _embed_text(self, text_value: str) -> Optional[list[float]]:
-        if not self._semantic_enabled or not self._embedding_client:
-            return None
-        try:
-            vector = self._embedding_client.embed_query(text_value)
-            if not vector:
-                return None
-            return [float(x) for x in vector]
-        except Exception as exc:
-            logger.warning("Embedding generation failed, skipping semantic dedupe: %s", exc)
-            return None
-
-    @staticmethod
-    def _cosine_similarity(vec_a: list[float], vec_b: list[float]) -> float:
-        if not vec_a or not vec_b or len(vec_a) != len(vec_b):
-            return 0.0
-        dot = sum(a * b for a, b in zip(vec_a, vec_b))
-        norm_a = math.sqrt(sum(a * a for a in vec_a))
-        norm_b = math.sqrt(sum(b * b for b in vec_b))
-        if norm_a == 0 or norm_b == 0:
-            return 0.0
-        return dot / (norm_a * norm_b)
-
     @staticmethod
     def _normalize_claim(text: str) -> str:
         normalized = (text or "").lower().strip()
@@ -188,7 +145,6 @@ class TrustedDBRepository:
         topic: str,
         normalized_claim: str,
         seen_at: datetime,
-        candidate_embedding: Optional[list[float]] = None,
     ) -> Optional[TrustedClaimORM]:
         window_start = seen_at - timedelta(days=30)
         candidates = session.execute(
@@ -200,26 +156,15 @@ class TrustedDBRepository:
 
         best_match = None
         best_score = 0.0
+        threshold = 0.85
         for row in candidates:
             existing_norm = row.normalized_claim or self._normalize_claim(row.claim)
             score = difflib.SequenceMatcher(None, existing_norm, normalized_claim).ratio()
-
-            if candidate_embedding and row.claim_embedding_json:
-                try:
-                    existing_embedding = json.loads(row.claim_embedding_json)
-                    semantic_score = self._cosine_similarity(existing_embedding, candidate_embedding)
-                    score = max(score, semantic_score)
-                except json.JSONDecodeError:
-                    pass
 
             if score > best_score:
                 best_score = score
                 best_match = row
 
-        threshold = min(
-            TRUSTED_CLAIM_SIMILARITY_THRESHOLD,
-            TRUSTED_CLAIM_SEMANTIC_SIMILARITY_THRESHOLD,
-        ) if candidate_embedding else TRUSTED_CLAIM_SIMILARITY_THRESHOLD
         if best_match and best_score >= threshold:
             return best_match
         return None
@@ -251,7 +196,6 @@ class TrustedDBRepository:
     ) -> tuple[int, bool]:
         now = seen_at or datetime.utcnow()
         normalized_claim = self._normalize_claim(claim)
-        claim_embedding = self._embed_text(claim)
         with self._session_factory() as session:
             existing = session.execute(
                 select(TrustedClaimORM).where(
@@ -266,7 +210,6 @@ class TrustedDBRepository:
                     topic=topic,
                     normalized_claim=normalized_claim,
                     seen_at=now,
-                    candidate_embedding=claim_embedding,
                 )
 
             if existing:
@@ -279,8 +222,6 @@ class TrustedDBRepository:
                     existing_sources = []
                 merged_sources = self._merge_sources(existing_sources, sources)
                 existing.sources_json = json.dumps(merged_sources, ensure_ascii=False)
-                if claim_embedding and not existing.claim_embedding_json:
-                    existing.claim_embedding_json = json.dumps(claim_embedding)
                 session.add(existing)
                 session.commit()
                 session.refresh(existing)
@@ -290,7 +231,6 @@ class TrustedDBRepository:
                 topic=topic,
                 claim=claim,
                 normalized_claim=normalized_claim,
-                claim_embedding_json=json.dumps(claim_embedding) if claim_embedding else None,
                 confidence=confidence,
                 sources_json=json.dumps(self._merge_sources([], sources), ensure_ascii=False),
                 first_seen_at=now,
