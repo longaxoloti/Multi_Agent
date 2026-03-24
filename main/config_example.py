@@ -132,6 +132,10 @@ CAMOUFOX_ENABLED = _env_bool("CAMOUFOX_ENABLED", True)
 CAMOUFOX_API_URL = os.getenv("CAMOUFOX_API_URL", "{your_camoufox_api_url}")
 CAMOUFOX_STRICT_ONLY = _env_bool("CAMOUFOX_STRICT_ONLY", True)
 
+# Tavily Search (fallback when Camoufox is disabled or unreachable)
+TAVILY_API_KEY = os.getenv("TAVILY_API_KEY", "")
+TAVILY_ENABLED = _env_bool("TAVILY_ENABLED", False)
+
 # Crawl4AI
 CRAWL4AI_ENABLED = _env_bool("CRAWL4AI_ENABLED", True)
 RESEARCH_MAX_SEARCH_QUERIES = int(os.getenv("RESEARCH_MAX_SEARCH_QUERIES", "2"))
