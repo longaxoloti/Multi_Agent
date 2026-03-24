@@ -26,6 +26,14 @@ from main.config import (
     OLLAMA_ORCHESTRATOR_MODEL,
     OLLAMA_RESEARCH_MODEL,
 )
+
+# Tavily config — imported with safe defaults so existing deployments
+# that have not yet added these variables to their config.py still work.
+try:
+    from main.config import TAVILY_ENABLED, TAVILY_API_KEY
+except ImportError:
+    TAVILY_ENABLED = False
+    TAVILY_API_KEY = ""
 from tools.camofox_mcp_client import CamoFoxMCPClient
 from tools.chrome_cdp_client import ChromeCDPClient
 from tools.google_guard import GoogleGuard, GoogleGuardConfig
@@ -85,11 +93,15 @@ async def research_node(state: AgentState) -> dict:
     _debug_log("START", "topic", topic)
     _debug_log("START", "search_query", search_query)
     _debug_log("START", "research_query", research_query)
-    if not CAMOUFOX_ENABLED:
+    if not CAMOUFOX_ENABLED and TAVILY_ENABLED and TAVILY_API_KEY:
+        logger.info("Camoufox disabled; using Tavily search fallback.")
+        collected_context, discovered_sources = await _tavily_search_fallback(research_query)
+    elif not CAMOUFOX_ENABLED:
         collected_context = (
-            "Research unavailable: CAMOUFOX_ENABLED=false. "
-            "This research flow only supports Camoufox browser crawling."
+            "Research unavailable: CAMOUFOX_ENABLED=false and TAVILY_ENABLED=false. "
+            "Enable Tavily or Camoufox to use the research pipeline."
         )
+        discovered_sources = []
     else:
         logger.info("Research crawl mode is active.")
         camoufox_user_id = str(state.get("chat_id") or session_id or "agent")
@@ -115,10 +127,14 @@ async def research_node(state: AgentState) -> dict:
         try:
             is_up = await browser.ping()
             if not is_up:
-                collected_context = (
-                    "Research unavailable: Camoufox MCP server/browser is down. "
-                    "No fallback sources are allowed."
-                )
+                if TAVILY_ENABLED and TAVILY_API_KEY:
+                    logger.info("Camoufox unreachable; falling back to Tavily search.")
+                    collected_context, discovered_sources = await _tavily_search_fallback(research_query)
+                else:
+                    collected_context = (
+                        "Research unavailable: Camoufox MCP server/browser is down "
+                        "and TAVILY_ENABLED=false. No fallback sources are available."
+                    )
             else:
                 closed = await browser.close_all_tabs()
                 if closed:
@@ -184,7 +200,7 @@ async def research_node(state: AgentState) -> dict:
         _debug_log("MODEL_OUTPUT", "error_occurred", str(e))
 
     # =========================== Extract Sources ===================================
-    if CAMOUFOX_ENABLED:
+    if CAMOUFOX_ENABLED or (TAVILY_ENABLED and TAVILY_API_KEY):
         sources = list(dict.fromkeys(discovered_sources))[:10]
     else:
         sources = re.findall(r'https?://[^\s"<>]+', collected_context)
@@ -420,6 +436,64 @@ def _looks_like_bot_challenge(url: str, snapshot_text: str) -> bool:
 async def _behavior_pause(multiplier: float = 1.0) -> None:
     base = random.uniform(CAMOFOX_BEHAVIOR_MIN_DELAY_SECONDS, CAMOFOX_BEHAVIOR_MAX_DELAY_SECONDS)
     await asyncio.sleep(max(0.2, base * max(0.2, multiplier)))
+
+
+async def _tavily_search_fallback(query: str) -> tuple[str, list[str]]:
+    """Execute a Tavily web search and return (context_text, source_urls)."""
+    from tavily import AsyncTavilyClient
+
+    logger.info("Tavily fallback search | query=%r", query)
+    _debug_log("TAVILY_START", "query", query)
+
+    try:
+        client = AsyncTavilyClient(api_key=TAVILY_API_KEY)
+        response = await client.search(
+            query=query,
+            max_results=RESEARCH_MAX_DISCOVERED_SOURCES,
+            search_depth="advanced",
+            topic="general",
+        )
+    except Exception as exc:
+        logger.error("Tavily search failed: %s", exc, exc_info=True)
+        _debug_log("TAVILY_ERROR", "exception", str(exc))
+        return (
+            "Research unavailable: Tavily search request failed. "
+            "Treat context as insufficient and avoid unsupported claims.",
+            [],
+        )
+
+    results = response.get("results", [])
+    _debug_log("TAVILY_RESULT", "result_count", len(results))
+
+    context_parts: list[str] = []
+    discovered_sources: list[str] = []
+
+    for item in results:
+        url = item.get("url", "")
+        title = item.get("title", "")
+        content = item.get("content", "")
+        if not url or not content:
+            continue
+        discovered_sources.append(url)
+        context_parts.append(
+            f"=== TAVILY RESULT ===\n"
+            f"URL: {url}\n"
+            f"TITLE: {title}\n"
+            f"CONTENT:\n{content}"
+        )
+
+    if not context_parts:
+        return (
+            "No results returned from Tavily search. "
+            "Treat context as insufficient and avoid unsupported claims.",
+            [],
+        )
+
+    context_text = "\n\n".join(context_parts)
+    _debug_log("TAVILY_RESULT", "total_sources", len(discovered_sources))
+    _debug_log("TAVILY_RESULT", "context_chars", len(context_text))
+    logger.info("Tavily fallback | sources=%d context_chars=%d", len(discovered_sources), len(context_text))
+    return context_text, discovered_sources
 
 
 async def perform_camoufox_direct_crawl(
