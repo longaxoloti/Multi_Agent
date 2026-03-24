@@ -12,7 +12,6 @@ from tools.workspace_priming import build_system_prompt
 logger = logging.getLogger(__name__)
 
 _ORCHESTRATOR_PLAN_PROMPT = """\
-You are the Orchestrator Agent.
 You must perform internal step-by-step reasoning (Chain-of-Thought),
 but you MUST NOT output any chain-of-thought. Output only strict JSON.
 

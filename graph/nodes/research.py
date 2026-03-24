@@ -59,7 +59,7 @@ def _debug_log(step: str, key: str, value, prefix: str = ""):
         except Exception as e:
             logger.warning("Failed to write debug log: %s", e)
 
-# END DEBUG LOGGING
+# END DEBUG
 
 async def research_node(state: AgentState) -> dict:
     logger.info("--- RESEARCH NODE ---")
@@ -246,16 +246,7 @@ def _compact_search_query(query: str) -> str:
     if not tokens:
         return raw[:120]
 
-    stopwords = {
-        "bạn", "hãy", "cho", "tôi", "mình", "giúp", "vui", "lòng", "về", "với",
-        "các", "những", "thông", "tin", "mới", "nhất", "hôm", "nay", "đi", "nhé",
-        "please", "help", "give", "tell", "me", "the", "latest", "about",
-    }
-    compact = [token for token in tokens if token.lower() not in stopwords]
-    if not compact:
-        compact = tokens
-
-    return " ".join(compact[:8])[:120]
+    return " ".join(tokens[:10])[:120]
 
 def _extract_refs_from_snapshot(snapshot_text: str) -> list[tuple[str, str]]:
     pattern = re.compile(r"\[link\s+(e\d+)\]\s*([^\n\r]+)", flags=re.IGNORECASE)
@@ -289,14 +280,14 @@ def _extract_urls_from_text(text: str) -> list[str]:
 async def _generate_search_queries(topic: str, user_text: str) -> list[str]:
     llm = get_llm(task_type="research", temperature=0.2)
     prompt = (
-        "Bạn là trợ lý nghiên cứu. Hãy tạo truy vấn tìm kiếm web để tìm nguồn tin uy tín.\n"
+        "You are a research assistant. Please generate a web search query to find reliable sources.\n"
         f"Topic: {topic}\n"
         f"User context: {user_text}\n\n"
-        "Yêu cầu:\n"
-        "- Chỉ trả về đúng 1 truy vấn duy nhất.\n"
-        "- Truy vấn phải tự nhiên như người dùng thật, không chứa chuỗi máy móc như: site, google, .com, http.\n"
-        "- Không đánh số, không ký hiệu đầu dòng, không giải thích thêm.\n"
-        "- Tập trung vào thông tin mới nhất liên quan trực tiếp tới topic."
+        "Requirements:\n"
+        "- Return only 1 query.\n"
+        "- The query should be natural, like a real user, without machine-like strings such as: site, google, .com, http.\n"
+        "- Do not number, do not use bullet points, do not explain further.\n"
+        "- Focus on the latest information directly related to the topic."
     )
     try:
         response = await llm.ainvoke([HumanMessage(content=prompt)])
@@ -325,11 +316,11 @@ async def _select_refs_with_llm(snapshot_text: str, query: str, max_refs: int = 
     refs_prompt = "\n".join(f"{ref_id}: {label}" for ref_id, label in refs[:40])
     llm = get_llm(task_type="research", temperature=0.0)
     prompt = (
-        "Chọn các ref tương ứng liên kết bài viết tin tức đáng tin cậy và liên quan nhất.\n"
+        "Select the refs corresponding to the most reliable and relevant news articles.\n"
         f"Search query: {query}\n\n"
-        "Danh sách refs:\n"
+        "List of refs:\n"
         f"{refs_prompt}\n\n"
-        "Trả về chỉ các ref, cách nhau bằng dấu cách (vd: e4 e8 e12)."
+        "Return only the refs, separated by spaces (e.g., e4 e8 e12)."
     )
     try:
         response = await llm.ainvoke([HumanMessage(content=prompt)])
@@ -359,11 +350,11 @@ async def _rerank_non_allowlisted_sources(topic: str, candidates: list[dict]) ->
         for index, item in enumerate(candidates[:20])
     )
     prompt = (
-        "Xếp hạng các URL theo mức độ uy tín nguồn và độ liên quan với topic.\n"
+        "Rank the URLs by source credibility and relevance to the topic.\n"
         f"Topic: {topic}\n\n"
         "URLs:\n"
         f"{prompt_items}\n\n"
-        "Trả về thứ tự chỉ bằng số, cách nhau bởi khoảng trắng (vd: 2 1 3)."
+        "Return only the order of numbers, separated by spaces (e.g., 2 1 3)."
     )
 
     try:
@@ -435,7 +426,6 @@ async def perform_camoufox_direct_crawl(
     logger.info("Research evidence | generated_queries=%s max_used=1", search_queries)
     _debug_log("CAMOUFOX_START", "search_queries_generated", search_queries)
 
-    # Persistent controls to avoid self-inflicted Google bot flags.
     google_guard = GoogleGuard(
         config=GoogleGuardConfig(
             min_interval_seconds=GOOGLE_MIN_INTERVAL_SECONDS,
