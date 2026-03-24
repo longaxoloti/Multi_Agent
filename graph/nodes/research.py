@@ -200,7 +200,7 @@ async def research_node(state: AgentState) -> dict:
         _debug_log("MODEL_OUTPUT", "error_occurred", str(e))
 
     # =========================== Extract Sources ===================================
-    if CAMOUFOX_ENABLED or (TAVILY_ENABLED and TAVILY_API_KEY and not CAMOUFOX_ENABLED):
+    if CAMOUFOX_ENABLED or (TAVILY_ENABLED and TAVILY_API_KEY):
         sources = list(dict.fromkeys(discovered_sources))[:10]
     else:
         sources = re.findall(r'https?://[^\s"<>]+', collected_context)
@@ -440,14 +440,14 @@ async def _behavior_pause(multiplier: float = 1.0) -> None:
 
 async def _tavily_search_fallback(query: str) -> tuple[str, list[str]]:
     """Execute a Tavily web search and return (context_text, source_urls)."""
-    from tavily import TavilyClient
+    from tavily import AsyncTavilyClient
 
     logger.info("Tavily fallback search | query=%r", query)
     _debug_log("TAVILY_START", "query", query)
 
     try:
-        client = TavilyClient(api_key=TAVILY_API_KEY)
-        response = client.search(
+        client = AsyncTavilyClient(api_key=TAVILY_API_KEY)
+        response = await client.search(
             query=query,
             max_results=RESEARCH_MAX_DISCOVERED_SOURCES,
             search_depth="advanced",
