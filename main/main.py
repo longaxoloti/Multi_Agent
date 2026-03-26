@@ -31,7 +31,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger("main")
 
-for noisy in ["httpx", "httpcore", "chromadb"]:
+for noisy in ["httpx", "httpcore"]:
     logging.getLogger(noisy).setLevel(logging.WARNING)
 
 _BOT_LOCK_FILE_HANDLE = None

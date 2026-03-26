@@ -3,10 +3,7 @@ import logging
 from datetime import datetime
 from typing import Optional
 
-import chromadb
-from chromadb.config import Settings
-
-from main.config import MEMORY_DIR, CHROMA_COLLECTION_NAME, MAX_CONVERSATION_HISTORY
+from main.config import MAX_CONVERSATION_HISTORY
 from rag.chunking import build_document_chunks
 
 logger = logging.getLogger(__name__)
@@ -15,19 +12,8 @@ logger = logging.getLogger(__name__)
 class MemoryManager:
     def __init__(self):
         self._conversations: dict[str, list[dict]] = {}
-        self._chroma_client = chromadb.PersistentClient(
-            path=str(MEMORY_DIR / "chromadb"),
-            settings=Settings(anonymized_telemetry=False),
-        )
-        self._collection = self._chroma_client.get_or_create_collection(
-            name=CHROMA_COLLECTION_NAME,
-            metadata={"hnsw:space": "cosine"},
-        )
-        logger.info(
-            "MemoryManager initialized. ChromaDB collection '%s' has %d entries.",
-            CHROMA_COLLECTION_NAME,
-            self._collection.count(),
-        )
+        self._memories: dict[str, dict] = {}
+        logger.info("MemoryManager initialized in legacy in-memory mode.")
 
     def add_message(self, chat_id: str, role: str, content: str) -> None:
         """Add a message to the conversation history for a specific chat."""
@@ -106,12 +92,11 @@ class MemoryManager:
             meta["chat_id"] = str(chat_id)
         if metadata:
             meta.update(metadata)
-
-        self._collection.upsert(
-            ids=[memory_id],
-            documents=[content],
-            metadatas=[meta],
-        )
+        self._memories[memory_id] = {
+            "id": memory_id,
+            "content": content,
+            "metadata": meta,
+        }
         logger.info("Stored memory '%s' (type=%s, len=%d)", memory_id, memory_type, len(content))
         return memory_id
 
@@ -123,55 +108,45 @@ class MemoryManager:
         chat_id: Optional[str] = None,
         include_global: bool = True,
     ) -> list[dict]:
-        where_filter = self._build_scope_filter(
-            chat_id=chat_id,
-            include_global=include_global,
-            memory_type=memory_type,
-        )
+        query_tokens = [token.strip().lower() for token in (query or "").split() if token.strip()]
+        rows: list[dict] = []
+        for row in self._memories.values():
+            meta = row.get("metadata", {})
+            if memory_type and meta.get("type") != memory_type:
+                continue
 
-        try:
-            results = self._collection.query(
-                query_texts=[query],
-                n_results=min(n_results, self._collection.count() or 1),
-                where=where_filter,
+            row_chat_id = str(meta.get("chat_id")) if meta.get("chat_id") is not None else None
+            row_scope = meta.get("scope")
+            if chat_id:
+                if include_global:
+                    if row_chat_id != str(chat_id) and row_scope != "global":
+                        continue
+                elif row_chat_id != str(chat_id):
+                    continue
+            elif not include_global and row_scope != "user":
+                continue
+
+            content = str(row.get("content") or "")
+            meta_text = json.dumps(meta, ensure_ascii=False)
+            searchable_text = f"{content}\n{meta_text}".lower()
+            if query_tokens and not all(token in searchable_text for token in query_tokens):
+                continue
+
+            rows.append(
+                {
+                    "content": content,
+                    "metadata": meta,
+                    "distance": 0.0,
+                    "id": row.get("id"),
+                }
             )
-        except Exception as e:
-            logger.warning("Memory search failed: %s", e)
-            return []
-
-        memories = []
-        if results and results["documents"]:
-            for i, doc in enumerate(results["documents"][0]):
-                memories.append(
-                    {
-                        "content": doc,
-                        "metadata": results["metadatas"][0][i] if results["metadatas"] else {},
-                        "distance": results["distances"][0][i] if results["distances"] else None,
-                        "id": results["ids"][0][i] if results["ids"] else None,
-                    }
-                )
-        return memories
+        return rows[:max(1, n_results)]
 
     def get_memory_count(self) -> int:
-        return self._collection.count()
+        return len(self._memories)
 
     def get_memory(self, memory_id: str) -> Optional[dict]:
-        try:
-            result = self._collection.get(ids=[memory_id])
-        except Exception as e:
-            logger.warning("Failed to get memory '%s': %s", memory_id, e)
-            return None
-
-        if not result or not result.get("ids"):
-            return None
-        if not result["ids"]:
-            return None
-
-        return {
-            "id": result["ids"][0],
-            "content": result["documents"][0] if result.get("documents") else "",
-            "metadata": result["metadatas"][0] if result.get("metadatas") else {},
-        }
+        return self._memories.get(memory_id)
 
     def save_conversation_summary(
         self,
@@ -249,33 +224,37 @@ class MemoryManager:
         chat_id: Optional[str] = None,
         include_global: bool = True,
     ) -> list[dict]:
-        try:
-            where_filter = self._build_scope_filter(
-                chat_id=chat_id,
-                include_global=include_global,
-                memory_type="user_preference",
+        preferences: list[dict] = []
+        for row in self._memories.values():
+            meta = row.get("metadata", {})
+            if meta.get("type") != "user_preference":
+                continue
+
+            row_chat_id = str(meta.get("chat_id")) if meta.get("chat_id") is not None else None
+            row_scope = meta.get("scope")
+
+            if chat_id:
+                if include_global:
+                    if row_chat_id != str(chat_id) and row_scope != "global":
+                        continue
+                elif row_chat_id != str(chat_id):
+                    continue
+            elif not include_global and row_scope != "user":
+                continue
+
+            preferences.append(
+                {
+                    "content": row.get("content", ""),
+                    "metadata": meta,
+                    "id": row.get("id"),
+                }
             )
-            results = self._collection.get(
-                where=where_filter,
-            )
-            preferences = []
-            if results and results["documents"]:
-                for i, doc in enumerate(results["documents"]):
-                    preferences.append(
-                        {
-                            "content": doc,
-                            "metadata": results["metadatas"][i] if results["metadatas"] else {},
-                            "id": results["ids"][i] if results["ids"] else None,
-                        }
-                    )
-            return preferences
-        except Exception as e:
-            logger.warning("Failed to get user preferences: %s", e)
-            return []
+        return preferences
 
     def delete_memory(self, memory_id: str) -> bool:
         try:
-            self._collection.delete(ids=[memory_id])
+            if memory_id in self._memories:
+                del self._memories[memory_id]
             logger.info("Deleted memory '%s'", memory_id)
             return True
         except Exception as e:

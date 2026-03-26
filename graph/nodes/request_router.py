@@ -34,26 +34,26 @@ def _handle_knowledge_request(chat_id: str, req: KnowledgeRequest) -> str:
 
     if req.action == "save":
         if not req.content:
-            return "Thiếu nội dung để lưu. Dùng: /save <nội dung>"
+            return "Not enough content to store. Use: /save <content>"
         saved = service.save(chat_id=chat_id, content=req.content, category=req.category)
         return (
-            f"Đã lưu dữ liệu thành công.\n"
+            f"Data saved successfully.\n"
             f"- id: {saved['record_id']}\n"
             f"- category: {saved['category']}\n"
-            f"- storage: {'PostgreSQL + ChromaDB' if saved['stored_in_db'] else 'ChromaDB'}"
+            f"- storage: {'PostgreSQL + pgvector' if saved['stored_in_vector'] else 'PostgreSQL'}"
         )
 
     if req.action == "get":
         if not req.record_id:
-            return "Thiếu record id. Dùng: /get <id>"
+            return "Missing record id. Use: /get <id>"
         item = service.get(chat_id=chat_id, record_id=req.record_id)
         if not item:
-            return f"Không tìm thấy dữ liệu với id: {req.record_id}"
+            return f"Data not found with id: {req.record_id}"
         return _render_item(item)
 
     if req.action == "search":
         if not req.query:
-            return "Thiếu từ khóa tìm kiếm. Dùng: /search <query>"
+            return "Missing search query. Use: /search <query>"
         rows = service.search(
             chat_id=chat_id,
             query=req.query,
@@ -61,8 +61,8 @@ def _handle_knowledge_request(chat_id: str, req: KnowledgeRequest) -> str:
             category=req.category,
         )
         if not rows:
-            return "Không tìm thấy dữ liệu phù hợp."
-        lines = ["Kết quả tìm kiếm:"]
+            return "No matching data found."
+        lines = ["Search results:"]
         for row in rows:
             lines.append(_render_item(row))
         return "\n\n".join(lines)
@@ -70,21 +70,21 @@ def _handle_knowledge_request(chat_id: str, req: KnowledgeRequest) -> str:
     if req.action == "list":
         rows = service.list_recent(chat_id=chat_id, limit=req.limit)
         if not rows:
-            return "Chưa có dữ liệu nào được lưu."
-        lines = ["Danh sách dữ liệu gần đây:"]
+            return "No recent data found."
+        lines = ["Recent data list:"]
         for row in rows:
             lines.append(_render_item(row))
         return "\n\n".join(lines)
 
     if req.action == "delete":
         if not req.record_id:
-            return "Thiếu record id. Dùng: /delete <id>"
+            return "Missing record id. Use: /delete <id>"
         deleted = service.delete(chat_id=chat_id, record_id=req.record_id)
         if deleted:
-            return f"Đã xóa dữ liệu: {req.record_id}"
-        return f"Không thể xóa hoặc không tìm thấy id: {req.record_id}"
+            return f"Data deleted successfully: {req.record_id}"
+        return f"Failed to delete or data not found with id: {req.record_id}"
 
-    return "Yêu cầu chưa được hỗ trợ."
+    return "Request not supported."
 
 
 async def request_router_node(state: AgentState) -> dict:
@@ -107,7 +107,7 @@ async def request_router_node(state: AgentState) -> dict:
     except Exception as exc:
         logger.error("Knowledge request handler failed: %s", exc, exc_info=True)
         return {
-            "messages": [AIMessage(content="Không thể xử lý yêu cầu lưu/lấy dữ liệu lúc này.")],
+            "messages": [AIMessage(content="Not able to process the save/retrieve data request at the moment.")],
             "routing_decision": "CHAT",
             "knowledge_action": "handled",
         }

@@ -15,21 +15,23 @@ for d in [DATA_DIR, SESSIONS_DIR, MEMORY_DIR, LOGS_DIR]:
 
 load_dotenv(PROJECT_ROOT / ".env")
 
-
 def _env_bool(name: str, default: bool) -> bool:
     value = os.getenv(name)
     if value is None:
         return default
     return value.strip().lower() in {"1", "true", "yes", "on"}
 
-
-def _env_first(names: list[str], default: str) -> str:
-    """Return the first non-empty env value from *names*, else *default*."""
-    for name in names:
-        value = os.getenv(name)
-        if value is not None and value.strip():
-            return value.strip()
-    return default
+def _resolve_model_ref(value: str) -> str:
+    if not value:
+        return value
+    direct = os.getenv(value)
+    if direct is not None and direct.strip():
+        return direct.strip()
+    normalized = value.strip().upper().replace(".", "_")
+    normalized_ref = os.getenv(normalized)
+    if normalized_ref is not None and normalized_ref.strip():
+        return normalized_ref.strip()
+    return value.strip()
 
 # API
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
@@ -39,26 +41,7 @@ GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
 OLLAMA_ENABLED = _env_bool("OLLAMA_ENABLED", True)
 OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "{your_ollama_base_url}")
 
-YOUR_MODEL = _env_first(["YOUR_MODEL_ALIAS"], "{your_model_name}")
-
-# Setup default roles 
-OLLAMA_MODEL = _env_first(["OLLAMA_MODEL"], YOUR_MODEL)
-OLLAMA_ORCHESTRATOR_MODEL = _env_first(
-    ["OLLAMA_ORCHESTRATOR_MODEL", "YOUR_MODEL_ALIAS"],
-    YOUR_MODEL,
-)
-OLLAMA_CLASSIFIER_MODEL = _env_first(
-    ["OLLAMA_CLASSIFIER_MODEL", "YOUR_MODEL_ALIAS"],
-    YOUR_MODEL,
-)
-OLLAMA_RESEARCH_MODEL = _env_first(
-    ["OLLAMA_RESEARCH_MODEL", "YOUR_MODEL_ALIAS"],
-    YOUR_MODEL,
-)
-OLLAMA_CODER_MODEL = _env_first(
-    ["OLLAMA_CODER_MODEL", "YOUR_MODEL_ALIAS"],
-    YOUR_MODEL,
-)
+YOUR_MODEL = _resolve_model_ref(os.getenv("YOUR_MODEL_ALIAS"))
 
 # Telegram
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
@@ -76,7 +59,7 @@ TRUSTED_DB_URL = os.getenv(
 )
 TRUSTED_DB_REQUIRED = _env_bool("TRUSTED_DB_REQUIRED", False)
 
-# Knowledge persistence (hybrid: PostgreSQL source of truth + ChromaDB semantic index)
+# Knowledge persistence (PostgreSQL + pgvector only)
 KNOWLEDGE_DB_ENABLED = _env_bool("KNOWLEDGE_DB_ENABLED", True)
 KNOWLEDGE_DB_REQUIRED = _env_bool("KNOWLEDGE_DB_REQUIRED", False)
 KNOWLEDGE_ALLOW_NATURAL_LANGUAGE_COMMANDS = _env_bool(
@@ -85,31 +68,11 @@ KNOWLEDGE_ALLOW_NATURAL_LANGUAGE_COMMANDS = _env_bool(
 KNOWLEDGE_MAX_SEARCH_RESULTS = int(os.getenv("KNOWLEDGE_MAX_SEARCH_RESULTS", "5"))
 KNOWLEDGE_MAX_CONTENT_CHARS = int(os.getenv("KNOWLEDGE_MAX_CONTENT_CHARS", "12000"))
 KNOWLEDGE_MAX_RECENT_ITEMS = int(os.getenv("KNOWLEDGE_MAX_RECENT_ITEMS", "10"))
+KNOWLEDGE_PGVECTOR_REQUIRED = _env_bool("KNOWLEDGE_PGVECTOR_REQUIRED", True)
 
-# Verifier
-VERIFIER_MIN_SOURCES = int(os.getenv("VERIFIER_MIN_SOURCES", "2"))
-VERIFIER_MIN_CONFIDENCE = float(os.getenv("VERIFIER_MIN_CONFIDENCE", "0.6"))
-VERIFIER_MAX_SEARCH_RESULTS = int(os.getenv("VERIFIER_MAX_SEARCH_RESULTS", "8"))
-VERIFIER_SOURCE_WEIGHTS_JSON = os.getenv("VERIFIER_SOURCE_WEIGHTS_JSON", "")
-VERIFIER_ALLOWED_DOMAINS = [
-    item.strip().lower() for item in os.getenv("VERIFIER_ALLOWED_DOMAINS", "").split(",") if item.strip()
-]
-VERIFIER_DENIED_DOMAINS = [
-    item.strip().lower() for item in os.getenv("VERIFIER_DENIED_DOMAINS", "").split(",") if item.strip()
-]
-
-# Trusted claim dedupe
-TRUSTED_CLAIM_SIMILARITY_THRESHOLD = float(
-    os.getenv("TRUSTED_CLAIM_SIMILARITY_THRESHOLD", "0.92")
-)
-TRUSTED_CLAIM_SEMANTIC_SIMILARITY_THRESHOLD = float(
-    os.getenv("TRUSTED_CLAIM_SEMANTIC_SIMILARITY_THRESHOLD", "0.88")
-)
-TRUSTED_CLAIM_ENABLE_SEMANTIC_DEDUPE = _env_bool(
-    "TRUSTED_CLAIM_ENABLE_SEMANTIC_DEDUPE", True
-)
-EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "models/text-embedding-004")
-
+KNOWLEDGE_EMBEDDING_PROVIDER = os.getenv("KNOWLEDGE_EMBEDDING_PROVIDER", "ollama").strip().lower()
+KNOWLEDGE_EMBEDDING_MODEL = os.getenv("KNOWLEDGE_EMBEDDING_MODEL", "bge-m3").strip()
+KNOWLEDGE_EMBEDDING_DIMS = int(os.getenv("KNOWLEDGE_EMBEDDING_DIMS", "1024"))
 
 # Airflow runtime policy
 AIRFLOW_REPORT_CATCHUP = _env_bool("AIRFLOW_REPORT_CATCHUP", True)
@@ -129,8 +92,13 @@ CRAWLER_POLL_SECONDS = int(os.getenv("CRAWLER_POLL_SECONDS", "900"))
 
 # Camoufox Server
 CAMOUFOX_ENABLED = _env_bool("CAMOUFOX_ENABLED", True)
-CAMOUFOX_API_URL = os.getenv("CAMOUFOX_API_URL", "{your_camoufox_api_url}")
+CAMOFOX_URL = os.getenv("CAMOFOX_URL", os.getenv("CAMOUFOX_API_URL", "http://127.0.0.1:9377"))
+CAMOUFOX_API_URL = os.getenv("CAMOUFOX_API_URL", CAMOFOX_URL)
 CAMOUFOX_STRICT_ONLY = _env_bool("CAMOUFOX_STRICT_ONLY", True)
+
+# Chrome CDP
+CHROME_CDP_ENABLED = _env_bool("CHROME_CDP_ENABLED", True)
+CHROME_CDP_PORT = int(os.getenv("CHROME_CDP_PORT", "9222"))
 
 # Crawl4AI
 CRAWL4AI_ENABLED = _env_bool("CRAWL4AI_ENABLED", True)
@@ -147,7 +115,6 @@ RESEARCH_SOURCE_ALLOWLIST = [
 
 # Memory in conversation
 MAX_CONVERSATION_HISTORY = 20
-CHROMA_COLLECTION_NAME = "agent_stock_memory"
 KNOWLEDGE_MEMORY_TYPE = os.getenv("KNOWLEDGE_MEMORY_TYPE", "user_knowledge")
 
 # Load system prompts from markdown files
