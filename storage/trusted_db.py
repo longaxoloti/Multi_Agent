@@ -15,17 +15,13 @@ from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, sessionmaker
 from main.config import (
     TRUSTED_DB_URL,
 )
-
 logger = logging.getLogger(__name__)
-
 
 class Base(DeclarativeBase):
     pass
 
-
 class TrustedClaimORM(Base):
     __tablename__ = "trusted_claims"
-
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     topic: Mapped[str] = mapped_column(String(120), index=True)
     claim: Mapped[str] = mapped_column(Text)
@@ -47,9 +43,11 @@ class UserKnowledgeRecordORM(Base):
     content: Mapped[str] = mapped_column(Text)
     tags_json: Mapped[str] = mapped_column(Text, default="[]")
     metadata_json: Mapped[str] = mapped_column(Text, default="{}")
+    embedding_model: Mapped[str] = mapped_column(String(80), default="")
+    embedding_dims: Mapped[int] = mapped_column(Integer, default=0)
+    embedding_json: Mapped[str] = mapped_column(Text, default="[]")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=False), index=True)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=False), index=True)
-
 
 @dataclass
 class TrustedClaim:
@@ -60,7 +58,6 @@ class TrustedClaim:
     first_seen_at: datetime
     last_verified_at: datetime
 
-
 @dataclass
 class UserKnowledgeRecord:
     id: str
@@ -70,9 +67,11 @@ class UserKnowledgeRecord:
     content: str
     tags: list[str]
     metadata: dict
+    embedding_model: str
+    embedding_dims: int
+    embedding: list[float]
     created_at: datetime
     updated_at: datetime
-
 
 class TrustedDBRepository:
     def __init__(self, db_url: Optional[str] = None):
@@ -85,48 +84,91 @@ class TrustedDBRepository:
         self._ensure_schema_compatibility()
         logger.info("Trusted DB schema ready")
 
+    def is_pgvector_ready(self) -> bool:
+        if self.engine.dialect.name != "postgresql":
+            return False
+        try:
+            with self.engine.begin() as conn:
+                ext_row = conn.execute(
+                    text("SELECT 1 FROM pg_extension WHERE extname = 'vector' LIMIT 1")
+                ).first()
+                if not ext_row:
+                    return False
+
+                col_row = conn.execute(
+                    text(
+                        """
+                        SELECT 1
+                        FROM information_schema.columns
+                        WHERE table_name = 'user_knowledge_records'
+                          AND column_name = 'embedding'
+                        LIMIT 1
+                        """
+                    )
+                ).first()
+                return bool(col_row)
+        except Exception:
+            return False
+
     def _ensure_schema_compatibility(self) -> None:
         inspector = inspect(self.engine)
+        table_names = inspector.get_table_names()
         if "trusted_claims" not in inspector.get_table_names():
-            return
-
-        cols = {col["name"] for col in inspector.get_columns("trusted_claims")}
-        if "normalized_claim" in cols:
-            normalized_exists = True
-        else:
-            normalized_exists = False
-
-        embedding_exists = "claim_embedding_json" in cols
-
-        if normalized_exists and embedding_exists:
-            return
+            pass
 
         dialect = self.engine.dialect.name
         with self.engine.begin() as conn:
-            if not normalized_exists:
-                if dialect == "postgresql":
-                    conn.execute(text("ALTER TABLE trusted_claims ADD COLUMN IF NOT EXISTS normalized_claim VARCHAR(512)"))
-                elif dialect == "sqlite":
-                    conn.execute(text("ALTER TABLE trusted_claims ADD COLUMN normalized_claim VARCHAR(512)"))
-                else:
-                    logger.warning("Unsupported dialect for auto-migration: %s", dialect)
-                    return
+            if "trusted_claims" in table_names:
+                cols = {col["name"] for col in inspector.get_columns("trusted_claims")}
+                normalized_exists = "normalized_claim" in cols
+                claim_embedding_exists = "claim_embedding_json" in cols
 
-                conn.execute(text("UPDATE trusted_claims SET normalized_claim = lower(claim) WHERE normalized_claim IS NULL"))
+                if not normalized_exists:
+                    if dialect == "postgresql":
+                        conn.execute(text("ALTER TABLE trusted_claims ADD COLUMN IF NOT EXISTS normalized_claim VARCHAR(512)"))
+                    elif dialect == "sqlite":
+                        conn.execute(text("ALTER TABLE trusted_claims ADD COLUMN normalized_claim VARCHAR(512)"))
+                    else:
+                        logger.warning("Unsupported dialect for auto-migration: %s", dialect)
+                        return
 
-                if dialect == "postgresql":
-                    conn.execute(text("CREATE INDEX IF NOT EXISTS idx_trusted_claims_normalized ON trusted_claims (normalized_claim)"))
-                elif dialect == "sqlite":
-                    conn.execute(text("CREATE INDEX IF NOT EXISTS idx_trusted_claims_normalized ON trusted_claims (normalized_claim)"))
+                    conn.execute(text("UPDATE trusted_claims SET normalized_claim = lower(claim) WHERE normalized_claim IS NULL"))
 
-            if not embedding_exists:
+                    if dialect == "postgresql":
+                        conn.execute(text("CREATE INDEX IF NOT EXISTS idx_trusted_claims_normalized ON trusted_claims (normalized_claim)"))
+                    elif dialect == "sqlite":
+                        conn.execute(text("CREATE INDEX IF NOT EXISTS idx_trusted_claims_normalized ON trusted_claims (normalized_claim)"))
+
+                if not claim_embedding_exists:
+                    if dialect == "postgresql":
+                        conn.execute(text("ALTER TABLE trusted_claims ADD COLUMN IF NOT EXISTS claim_embedding_json TEXT"))
+                    elif dialect == "sqlite":
+                        conn.execute(text("ALTER TABLE trusted_claims ADD COLUMN claim_embedding_json TEXT"))
+                    else:
+                        logger.warning("Unsupported dialect for embedding column migration: %s", dialect)
+                        return
+
+            if "user_knowledge_records" in table_names:
+                knowledge_cols = {col["name"] for col in inspector.get_columns("user_knowledge_records")}
+                if "embedding_model" not in knowledge_cols:
+                    if dialect == "postgresql":
+                        conn.execute(text("ALTER TABLE user_knowledge_records ADD COLUMN IF NOT EXISTS embedding_model VARCHAR(80) DEFAULT ''"))
+                    elif dialect == "sqlite":
+                        conn.execute(text("ALTER TABLE user_knowledge_records ADD COLUMN embedding_model VARCHAR(80) DEFAULT ''"))
+                if "embedding_dims" not in knowledge_cols:
+                    if dialect == "postgresql":
+                        conn.execute(text("ALTER TABLE user_knowledge_records ADD COLUMN IF NOT EXISTS embedding_dims INTEGER DEFAULT 0"))
+                    elif dialect == "sqlite":
+                        conn.execute(text("ALTER TABLE user_knowledge_records ADD COLUMN embedding_dims INTEGER DEFAULT 0"))
+                if "embedding_json" not in knowledge_cols:
+                    if dialect == "postgresql":
+                        conn.execute(text("ALTER TABLE user_knowledge_records ADD COLUMN IF NOT EXISTS embedding_json TEXT DEFAULT '[]'"))
+                    elif dialect == "sqlite":
+                        conn.execute(text("ALTER TABLE user_knowledge_records ADD COLUMN embedding_json TEXT DEFAULT '[]'"))
                 if dialect == "postgresql":
-                    conn.execute(text("ALTER TABLE trusted_claims ADD COLUMN IF NOT EXISTS claim_embedding_json TEXT"))
-                elif dialect == "sqlite":
-                    conn.execute(text("ALTER TABLE trusted_claims ADD COLUMN claim_embedding_json TEXT"))
-                else:
-                    logger.warning("Unsupported dialect for embedding column migration: %s", dialect)
-                    return
+                    conn.execute(text("CREATE EXTENSION IF NOT EXISTS vector"))
+                    conn.execute(text("ALTER TABLE user_knowledge_records ADD COLUMN IF NOT EXISTS embedding vector(1024)"))
+                    conn.execute(text("CREATE INDEX IF NOT EXISTS idx_user_knowledge_embedding_ivfflat ON user_knowledge_records USING ivfflat (embedding vector_cosine_ops) WITH (lists = 100)"))
 
     @staticmethod
     def _normalize_claim(text: str) -> str:
@@ -317,6 +359,9 @@ class TrustedDBRepository:
         title: str = "",
         tags: Optional[list[str]] = None,
         metadata: Optional[dict] = None,
+        embedding_model: str = "",
+        embedding_dims: int = 0,
+        embedding: Optional[list[float]] = None,
         record_id: Optional[str] = None,
     ) -> str:
         now = datetime.utcnow()
@@ -329,12 +374,32 @@ class TrustedDBRepository:
             content=content,
             tags_json=json.dumps(tags or [], ensure_ascii=False),
             metadata_json=json.dumps(metadata or {}, ensure_ascii=False),
+            embedding_model=(embedding_model or "").strip(),
+            embedding_dims=int(embedding_dims or 0),
+            embedding_json=json.dumps(embedding or [], ensure_ascii=False),
             created_at=now,
             updated_at=now,
         )
         with self._session_factory() as session:
             session.add(item)
             session.commit()
+
+        if embedding and self.engine.dialect.name == "postgresql":
+            vector_literal = self._to_vector_literal(embedding)
+            with self.engine.begin() as conn:
+                conn.execute(
+                    text(
+                        """
+                        UPDATE user_knowledge_records
+                        SET embedding = CAST(:embedding_literal AS vector)
+                        WHERE id = :record_id
+                        """
+                    ),
+                    {
+                        "embedding_literal": vector_literal,
+                        "record_id": final_id,
+                    },
+                )
         return final_id
 
     def get_knowledge_record(self, record_id: str, chat_id: Optional[str] = None) -> Optional[UserKnowledgeRecord]:
@@ -354,6 +419,9 @@ class TrustedDBRepository:
             content=row.content,
             tags=self._safe_json_loads(row.tags_json, []),
             metadata=self._safe_json_loads(row.metadata_json, {}),
+            embedding_model=row.embedding_model or "",
+            embedding_dims=int(row.embedding_dims or 0),
+            embedding=self._safe_json_loads(row.embedding_json, []),
             created_at=row.created_at,
             updated_at=row.updated_at,
         )
@@ -388,6 +456,9 @@ class TrustedDBRepository:
                     content=row.content,
                     tags=self._safe_json_loads(row.tags_json, []),
                     metadata=self._safe_json_loads(row.metadata_json, {}),
+                    embedding_model=row.embedding_model or "",
+                    embedding_dims=int(row.embedding_dims or 0),
+                    embedding=self._safe_json_loads(row.embedding_json, []),
                     created_at=row.created_at,
                     updated_at=row.updated_at,
                 )
@@ -436,11 +507,122 @@ class TrustedDBRepository:
                     content=row.content,
                     tags=self._safe_json_loads(row.tags_json, []),
                     metadata=self._safe_json_loads(row.metadata_json, {}),
+                    embedding_model=row.embedding_model or "",
+                    embedding_dims=int(row.embedding_dims or 0),
+                    embedding=self._safe_json_loads(row.embedding_json, []),
                     created_at=row.created_at,
                     updated_at=row.updated_at,
                 )
             )
         return results
+
+    @staticmethod
+    def _to_vector_literal(values: list[float]) -> str:
+        serialized = ",".join(f"{float(v):.10f}" for v in values)
+        return f"[{serialized}]"
+
+    @staticmethod
+    def _cosine_distance(a: list[float], b: list[float]) -> float:
+        if not a or not b:
+            return 1.0
+        size = min(len(a), len(b))
+        dot = 0.0
+        norm_a = 0.0
+        norm_b = 0.0
+        for i in range(size):
+            av = float(a[i])
+            bv = float(b[i])
+            dot += av * bv
+            norm_a += av * av
+            norm_b += bv * bv
+        if norm_a <= 0.0 or norm_b <= 0.0:
+            return 1.0
+        similarity = dot / ((norm_a ** 0.5) * (norm_b ** 0.5))
+        similarity = max(-1.0, min(1.0, similarity))
+        return 1.0 - similarity
+
+    def search_knowledge_records(
+        self,
+        *,
+        chat_id: str,
+        query_embedding: list[float],
+        limit: int = 5,
+        category: Optional[str] = None,
+    ) -> list[dict]:
+        safe_limit = max(1, min(limit, 100))
+        normalized_category = (category or "").strip().lower() or None
+
+        if self.engine.dialect.name == "postgresql":
+            query_vector = self._to_vector_literal(query_embedding)
+            base_sql = """
+                SELECT
+                    id, chat_id, category, title, content,
+                    tags_json, metadata_json, embedding_model, embedding_dims, embedding_json,
+                    created_at, updated_at,
+                    (embedding <=> CAST(:query_vector AS vector)) AS distance
+                FROM user_knowledge_records
+                WHERE chat_id = :chat_id
+                  AND embedding IS NOT NULL
+            """
+            params: dict = {
+                "query_vector": query_vector,
+                "chat_id": str(chat_id),
+                "limit": safe_limit,
+            }
+            if normalized_category:
+                base_sql += " AND category = :category "
+                params["category"] = normalized_category
+            base_sql += " ORDER BY embedding <=> CAST(:query_vector AS vector) ASC LIMIT :limit"
+
+            with self.engine.begin() as conn:
+                rows = conn.execute(text(base_sql), params).mappings().all()
+
+            return [
+                {
+                    "id": row["id"],
+                    "chat_id": row["chat_id"],
+                    "category": row["category"],
+                    "title": row["title"],
+                    "content": row["content"],
+                    "metadata": self._safe_json_loads(row.get("metadata_json"), {}),
+                    "tags": self._safe_json_loads(row.get("tags_json"), []),
+                    "distance": float(row.get("distance") or 0.0),
+                    "embedding_model": row.get("embedding_model") or "",
+                    "embedding_dims": int(row.get("embedding_dims") or 0),
+                    "created_at": row["created_at"],
+                    "updated_at": row["updated_at"],
+                }
+                for row in rows
+            ]
+
+        candidates = self.list_knowledge_records(
+            chat_id=str(chat_id),
+            limit=1000,
+            category=normalized_category,
+        )
+        scored: list[dict] = []
+        for item in candidates:
+            if not item.embedding:
+                continue
+            distance = self._cosine_distance(query_embedding, item.embedding)
+            scored.append(
+                {
+                    "id": item.id,
+                    "chat_id": item.chat_id,
+                    "category": item.category,
+                    "title": item.title,
+                    "content": item.content,
+                    "metadata": item.metadata,
+                    "tags": item.tags,
+                    "distance": distance,
+                    "embedding_model": item.embedding_model,
+                    "embedding_dims": item.embedding_dims,
+                    "created_at": item.created_at,
+                    "updated_at": item.updated_at,
+                }
+            )
+        scored.sort(key=lambda row: row["distance"])
+        return scored[:safe_limit]
 
     def delete_knowledge_record(self, record_id: str, chat_id: Optional[str] = None) -> bool:
         with self._session_factory() as session:

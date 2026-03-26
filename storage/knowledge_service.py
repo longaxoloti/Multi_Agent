@@ -8,17 +8,16 @@ from main.config import (
     KNOWLEDGE_ALLOW_NATURAL_LANGUAGE_COMMANDS,
     KNOWLEDGE_DB_ENABLED,
     KNOWLEDGE_DB_REQUIRED,
+    KNOWLEDGE_EMBEDDING_DIMS,
+    KNOWLEDGE_EMBEDDING_MODEL,
+    KNOWLEDGE_EMBEDDING_PROVIDER,
     KNOWLEDGE_MAX_CONTENT_CHARS,
     KNOWLEDGE_MAX_RECENT_ITEMS,
     KNOWLEDGE_MAX_SEARCH_RESULTS,
-    KNOWLEDGE_MEMORY_TYPE,
+    KNOWLEDGE_PGVECTOR_REQUIRED,
 )
 from storage.trusted_db import TrustedDBRepository, UserKnowledgeRecord
-
-try:
-    from memory.memory_manager import MemoryManager
-except ModuleNotFoundError:
-    MemoryManager = None
+from tools.embedding_provider import embed_text_ollama
 
 logger = logging.getLogger(__name__)
 
@@ -37,22 +36,20 @@ class KnowledgeService:
     def __init__(
         self,
         *,
-        memory_manager: Optional[MemoryManager] = None,
         trusted_repo: Optional[TrustedDBRepository] = None,
         db_enabled: bool = KNOWLEDGE_DB_ENABLED,
         db_required: bool = KNOWLEDGE_DB_REQUIRED,
+        embedder=None,
     ):
-        if memory_manager is not None:
-            self._mm = memory_manager
-        elif MemoryManager is not None:
-            self._mm = MemoryManager()
-        else:
-            self._mm = None
-
         self._db_enabled = db_enabled
         self._db_required = db_required
+        self._pgvector_required = KNOWLEDGE_PGVECTOR_REQUIRED
         self._repo = trusted_repo
         self._repo_ready = False
+        self._embedder = embedder or embed_text_ollama
+        self._embedding_provider = KNOWLEDGE_EMBEDDING_PROVIDER
+        self._embedding_model = KNOWLEDGE_EMBEDDING_MODEL
+        self._embedding_dims = int(KNOWLEDGE_EMBEDDING_DIMS)
         self._init_repo()
 
     def _init_repo(self) -> None:
@@ -61,10 +58,16 @@ class KnowledgeService:
         try:
             self._repo = self._repo or TrustedDBRepository()
             self._repo.initialize()
+            if (
+                self._pgvector_required
+                and self._repo.engine.dialect.name == "postgresql"
+                and not self._repo.is_pgvector_ready()
+            ):
+                raise RuntimeError("pgvector is required but not ready in PostgreSQL")
             self._repo_ready = True
         except Exception as exc:
             self._repo_ready = False
-            logger.warning("Knowledge DB unavailable. Falling back to Chroma-only mode: %s", exc)
+            logger.warning("Knowledge DB unavailable: %s", exc)
             if self._db_required:
                 raise
 
@@ -88,37 +91,27 @@ class KnowledgeService:
         final_category = (category or "note").strip().lower()
         final_metadata = metadata or {}
 
-        record_id: Optional[str] = None
-        if self.can_use_db:
-            record_id = self._repo.save_knowledge_record(
-                chat_id=str(chat_id),
-                category=final_category,
-                title=title,
-                content=final_content,
-                tags=[],
-                metadata=final_metadata,
-            )
+        if not self.can_use_db:
+            raise RuntimeError("Knowledge database is not available")
 
-        memory_id = None
-        if self._mm is not None:
-            memory_id = self._mm.add_memory(
-                content=final_content,
-                memory_type=KNOWLEDGE_MEMORY_TYPE,
-                memory_id=record_id,
-                chat_id=str(chat_id),
-                scope="user",
-                metadata={
-                    "category": final_category,
-                    "title": title or "",
-                    "source": "knowledge_service",
-                    **final_metadata,
-                },
-            )
+        embedding_vector = self._build_embedding(final_content)
+
+        record_id = self._repo.save_knowledge_record(
+            chat_id=str(chat_id),
+            category=final_category,
+            title=title,
+            content=final_content,
+            tags=[],
+            metadata=final_metadata,
+            embedding_model=self._embedding_model,
+            embedding_dims=self._embedding_dims,
+            embedding=embedding_vector,
+        )
 
         return {
-            "record_id": record_id or memory_id,
+            "record_id": record_id,
             "stored_in_db": bool(record_id),
-            "stored_in_vector": bool(memory_id),
+            "stored_in_vector": bool(record_id),
             "category": final_category,
         }
 
@@ -127,26 +120,7 @@ class KnowledgeService:
             item = self._repo.get_knowledge_record(record_id=record_id, chat_id=str(chat_id))
             if item:
                 return self._serialize_record(item)
-
-        if self._mm is None:
-            return None
-
-        raw = self._mm.get_memory(record_id)
-        if not raw:
-            return None
-        metadata = raw.get("metadata", {}) or {}
-        if metadata.get("chat_id") and str(metadata.get("chat_id")) != str(chat_id):
-            return None
-
-        return {
-            "id": raw.get("id", record_id),
-            "chat_id": str(chat_id),
-            "category": metadata.get("category") or metadata.get("type") or "note",
-            "title": metadata.get("title", ""),
-            "content": raw.get("content", ""),
-            "metadata": metadata,
-            "created_at": metadata.get("timestamp", ""),
-        }
+        return None
 
     def search(
         self,
@@ -156,25 +130,17 @@ class KnowledgeService:
         limit: int = KNOWLEDGE_MAX_SEARCH_RESULTS,
         category: Optional[str] = None,
     ) -> list[dict]:
-        if self._mm is None:
+        if not self.can_use_db:
             return []
 
         safe_limit = max(1, min(limit, KNOWLEDGE_MAX_SEARCH_RESULTS))
-        rows = self._mm.search_memory(
-            query=query,
-            n_results=safe_limit,
-            memory_type=KNOWLEDGE_MEMORY_TYPE,
+        query_embedding = self._build_embedding((query or "").strip())
+        rows = self._repo.search_knowledge_records(
             chat_id=str(chat_id),
-            include_global=False,
+            query_embedding=query_embedding,
+            limit=safe_limit,
+            category=category,
         )
-
-        normalized_category = (category or "").strip().lower()
-        if normalized_category:
-            rows = [
-                item
-                for item in rows
-                if (item.get("metadata", {}).get("category", "").strip().lower() == normalized_category)
-            ]
 
         results: list[dict] = []
         for item in rows:
@@ -183,10 +149,12 @@ class KnowledgeService:
                 {
                     "id": item.get("id"),
                     "content": item.get("content", ""),
-                    "category": meta.get("category") or "note",
-                    "title": meta.get("title", ""),
+                    "category": item.get("category") or meta.get("category") or "note",
+                    "title": item.get("title") or meta.get("title", ""),
                     "distance": item.get("distance"),
                     "metadata": meta,
+                    "embedding_model": item.get("embedding_model") or "",
+                    "embedding_dims": int(item.get("embedding_dims") or 0),
                 }
             )
         return results
@@ -209,11 +177,26 @@ class KnowledgeService:
         return []
 
     def delete(self, *, chat_id: str, record_id: str) -> bool:
-        db_deleted = False
-        if self.can_use_db:
-            db_deleted = self._repo.delete_knowledge_record(record_id=record_id, chat_id=str(chat_id))
-        vector_deleted = self._mm.delete_memory(record_id) if self._mm is not None else False
-        return db_deleted or vector_deleted
+        if not self.can_use_db:
+            return False
+        return self._repo.delete_knowledge_record(record_id=record_id, chat_id=str(chat_id))
+
+    def _build_embedding(self, text: str) -> list[float]:
+        if self._embedding_provider != "ollama":
+            raise ValueError(
+                f"Unsupported embedding provider '{self._embedding_provider}'. Expected 'ollama'."
+            )
+
+        vector = self._embedder(
+            text,
+            model=self._embedding_model,
+            expected_dims=self._embedding_dims,
+        )
+        if len(vector) != self._embedding_dims:
+            raise ValueError(
+                f"Embedding dimension mismatch: got {len(vector)}, expected {self._embedding_dims}."
+            )
+        return vector
 
     @staticmethod
     def _serialize_record(item: UserKnowledgeRecord) -> dict:
@@ -225,6 +208,9 @@ class KnowledgeService:
             "content": item.content,
             "metadata": item.metadata,
             "tags": item.tags,
+            "embedding_model": item.embedding_model,
+            "embedding_dims": item.embedding_dims,
+            "embedding": item.embedding,
             "created_at": item.created_at.isoformat(),
             "updated_at": item.updated_at.isoformat(),
         }
