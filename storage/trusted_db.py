@@ -10,15 +10,18 @@ from datetime import datetime, timedelta
 from typing import Optional
 
 from sqlalchemy import DateTime, Float, Integer, String, Text, create_engine, inspect, select, text
-from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, sessionmaker
+from sqlalchemy.orm import Mapped, mapped_column, sessionmaker
 
 from main.config import (
     TRUSTED_DB_URL,
 )
+from storage.models import Base  # shared Base for all schemas
+
 logger = logging.getLogger(__name__)
 
-class Base(DeclarativeBase):
-    pass
+# ---------------------------------------------------------------------------
+# Legacy ORM models (public schema) — kept for backward compatibility
+# ---------------------------------------------------------------------------
 
 class TrustedClaimORM(Base):
     __tablename__ = "trusted_claims"
@@ -34,6 +37,7 @@ class TrustedClaimORM(Base):
 
 
 class UserKnowledgeRecordORM(Base):
+    """Legacy table — kept for backward compat. New data uses schema-specific tables."""
     __tablename__ = "user_knowledge_records"
 
     id: Mapped[str] = mapped_column(String(64), primary_key=True)
@@ -48,6 +52,11 @@ class UserKnowledgeRecordORM(Base):
     embedding_json: Mapped[str] = mapped_column(Text, default="[]")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=False), index=True)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=False), index=True)
+
+
+# ---------------------------------------------------------------------------
+# Dataclasses (public API)
+# ---------------------------------------------------------------------------
 
 @dataclass
 class TrustedClaim:
@@ -73,16 +82,90 @@ class UserKnowledgeRecord:
     created_at: datetime
     updated_at: datetime
 
-class TrustedDBRepository:
+
+# ---------------------------------------------------------------------------
+# PostgreSQL schemas to create
+# ---------------------------------------------------------------------------
+_PG_SCHEMAS = ["system", "skills", "profile", "projects", "knowledge", "manual", "security"]
+
+# pgvector columns to ensure exist (table, schema, column, dims)
+_VECTOR_COLUMNS = [
+    ("skill_embeddings",   "skills",    "embedding", 1024),
+    ("profile_embeddings", "profile",   "embedding", 1024),
+    ("url_embeddings",     "knowledge", "embedding", 1024),
+    ("saved_embeddings",   "manual",    "embedding", 1024),
+]
+
+_HNSW_INDEXES = [
+    ("skills.skill_embeddings",     "embedding", "idx_skill_emb_hnsw"),
+    ("profile.profile_embeddings",  "embedding", "idx_profile_emb_hnsw"),
+    ("knowledge.url_embeddings",    "embedding", "idx_url_emb_hnsw"),
+    ("manual.saved_embeddings",     "embedding", "idx_saved_emb_hnsw"),
+]
+
+
+class AgentDBRepository:
+    """Central database repository for the multi-schema agent database."""
+
     def __init__(self, db_url: Optional[str] = None):
         self.db_url = db_url or TRUSTED_DB_URL
         self.engine = create_engine(self.db_url, future=True, pool_pre_ping=True)
         self._session_factory = sessionmaker(bind=self.engine, expire_on_commit=False, future=True)
 
     def initialize(self) -> None:
-        Base.metadata.create_all(self.engine)
+        """Create all schemas, tables, vector columns, and HNSW indexes."""
+        is_pg = self.engine.dialect.name == "postgresql"
+
+        if is_pg:
+            with self.engine.begin() as conn:
+                # Create pgvector extension
+                conn.execute(text("CREATE EXTENSION IF NOT EXISTS vector"))
+                # Create PostgreSQL schemas
+                for schema in _PG_SCHEMAS:
+                    conn.execute(text(f"CREATE SCHEMA IF NOT EXISTS {schema}"))
+
+            # Create all tables across all schemas (PostgreSQL)
+            Base.metadata.create_all(self.engine)
+        else:
+            # SQLite: only create public-schema tables (no schema support)
+            public_tables = [
+                t for t in Base.metadata.sorted_tables
+                if t.schema is None
+            ]
+            Base.metadata.create_all(self.engine, tables=public_tables)
+
+        # Legacy compatibility
         self._ensure_schema_compatibility()
-        logger.info("Trusted DB schema ready")
+
+        if is_pg:
+            self._ensure_vector_columns()
+            self._ensure_hnsw_indexes()
+
+        logger.info("Agent DB schema ready (all schemas initialized)")
+
+    def _ensure_vector_columns(self) -> None:
+        """Add pgvector columns to embedding tables if they don't exist yet."""
+        inspector = inspect(self.engine)
+        with self.engine.begin() as conn:
+            for table_name, schema, col_name, dims in _VECTOR_COLUMNS:
+                try:
+                    cols = {c["name"] for c in inspector.get_columns(table_name, schema=schema)}
+                except Exception:
+                    continue  # table doesn't exist yet
+                if col_name not in cols:
+                    conn.execute(text(
+                        f"ALTER TABLE {schema}.{table_name} "
+                        f"ADD COLUMN IF NOT EXISTS {col_name} vector({dims})"
+                    ))
+
+    def _ensure_hnsw_indexes(self) -> None:
+        """Create HNSW indexes for all vector columns."""
+        with self.engine.begin() as conn:
+            for fq_table, col_name, idx_name in _HNSW_INDEXES:
+                conn.execute(text(
+                    f"CREATE INDEX IF NOT EXISTS {idx_name} "
+                    f"ON {fq_table} USING hnsw ({col_name} vector_cosine_ops)"
+                ))
 
     def is_pgvector_ready(self) -> bool:
         if self.engine.dialect.name != "postgresql":
@@ -636,3 +719,7 @@ class TrustedDBRepository:
             session.delete(row)
             session.commit()
             return True
+
+
+# Backward-compatible alias
+TrustedDBRepository = AgentDBRepository

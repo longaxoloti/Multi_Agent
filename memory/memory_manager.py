@@ -1,7 +1,18 @@
+"""
+MemoryManager — Conversation memory with optional PostgreSQL persistence.
+
+Maintains an in-memory cache for current-session speed, with write-through
+persistence to ``system.conversation_sessions`` when a DB session factory is
+provided.  Falls back gracefully to pure in-memory if no DB is available.
+"""
+
 import json
 import logging
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional
+
+from sqlalchemy import select, text
+from sqlalchemy.orm import sessionmaker
 
 from main.config import MAX_CONVERSATION_HISTORY
 from rag.chunking import build_document_chunks
@@ -10,34 +21,146 @@ logger = logging.getLogger(__name__)
 
 
 class MemoryManager:
-    def __init__(self):
+    """
+    Hybrid in-memory / PostgreSQL conversation memory.
+
+    Usage::
+
+        # Pure in-memory (legacy)
+        mm = MemoryManager()
+
+        # With DB persistence
+        mm = MemoryManager(session_factory=repo._session_factory)
+    """
+
+    def __init__(
+        self,
+        *,
+        session_factory: Optional[sessionmaker] = None,
+        is_pg: bool = True,
+    ):
         self._conversations: dict[str, list[dict]] = {}
         self._memories: dict[str, dict] = {}
-        logger.info("MemoryManager initialized in legacy in-memory mode.")
+        self._session_factory = session_factory
+        self._is_pg = is_pg
+        self._db_ready = session_factory is not None and is_pg
+        mode = "PostgreSQL-backed" if self._db_ready else "in-memory only"
+        logger.info("MemoryManager initialized (%s).", mode)
+
+    # ==================================================================
+    # Conversation history
+    # ==================================================================
 
     def add_message(self, chat_id: str, role: str, content: str) -> None:
-        """Add a message to the conversation history for a specific chat."""
+        """Add a message — cached in memory and persisted to DB if available."""
         if chat_id not in self._conversations:
             self._conversations[chat_id] = []
-        self._conversations[chat_id].append(
-            {
-                "role": role,
-                "content": content,
-                "timestamp": datetime.now().isoformat(),
-            }
-        )
+
+        msg = {
+            "role": role,
+            "content": content,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+        }
+        self._conversations[chat_id].append(msg)
+
+        # Trim in-memory window
         if len(self._conversations[chat_id]) > MAX_CONVERSATION_HISTORY:
             self._conversations[chat_id] = self._conversations[chat_id][
                 -MAX_CONVERSATION_HISTORY:
             ]
 
+        # Write-through to DB
+        if self._db_ready:
+            self._persist_message(chat_id, role, content, len(self._conversations[chat_id]) - 1)
+
     def get_conversation_history(self, chat_id: str) -> list[dict]:
-        return self._conversations.get(chat_id, [])
+        """
+        Return recent conversation history.
+
+        Tries in-memory first; if empty and DB is available, loads from DB.
+        """
+        cached = self._conversations.get(chat_id)
+        if cached:
+            return cached
+
+        if self._db_ready:
+            loaded = self._load_history_from_db(chat_id)
+            if loaded:
+                self._conversations[chat_id] = loaded
+                return loaded
+
+        return []
 
     def clear_conversation(self, chat_id: str) -> None:
+        """Clear in-memory history for a chat. DB records are preserved for audit."""
         self._conversations.pop(chat_id, None)
 
-    # RAG
+    # ==================================================================
+    # Session flush / load
+    # ==================================================================
+
+    def flush_session(self, chat_id: str, session_id: str) -> int:
+        """
+        Persist all in-memory messages for ``chat_id`` to the database.
+
+        Returns the number of messages flushed.
+        """
+        if not self._db_ready:
+            return 0
+
+        history = self._conversations.get(chat_id, [])
+        if not history:
+            return 0
+
+        from storage.models import ConversationSessionORM, _new_uuid, _utcnow
+
+        count = 0
+        try:
+            with self._session_factory() as session:
+                for idx, msg in enumerate(history):
+                    row = ConversationSessionORM(
+                        id=_new_uuid(),
+                        chat_id=chat_id,
+                        session_id=session_id,
+                        role=msg["role"],
+                        content=msg["content"],
+                        message_index=idx,
+                        metadata_json=json.dumps(
+                            {"timestamp": msg.get("timestamp", "")},
+                            ensure_ascii=False,
+                        ),
+                    )
+                    session.add(row)
+                    count += 1
+                session.commit()
+            logger.info("Flushed %d messages for chat %s / session %s", count, chat_id, session_id)
+        except Exception as exc:
+            logger.error("Failed to flush session to DB: %s", exc)
+        return count
+
+    def load_recent_sessions(
+        self,
+        chat_id: str,
+        *,
+        limit: int = MAX_CONVERSATION_HISTORY,
+    ) -> list[dict]:
+        """
+        Load the most recent messages for ``chat_id`` from the database.
+
+        Populates the in-memory cache and returns the messages.
+        """
+        if not self._db_ready:
+            return []
+
+        loaded = self._load_history_from_db(chat_id, limit=limit)
+        if loaded:
+            self._conversations[chat_id] = loaded
+        return loaded
+
+    # ==================================================================
+    # Legacy memory API (unchanged)
+    # ==================================================================
+
     def _build_scope_filter(
         self,
         chat_id: Optional[str],
@@ -260,3 +383,62 @@ class MemoryManager:
         except Exception as e:
             logger.warning("Failed to delete memory '%s': %s", memory_id, e)
             return False
+
+    # ==================================================================
+    # Internal DB helpers
+    # ==================================================================
+
+    def _persist_message(self, chat_id: str, role: str, content: str, msg_index: int) -> None:
+        """Write a single message to the DB (fire-and-forget)."""
+        try:
+            from storage.models import ConversationSessionORM, _new_uuid
+
+            with self._session_factory() as session:
+                row = ConversationSessionORM(
+                    id=_new_uuid(),
+                    chat_id=chat_id,
+                    session_id=chat_id,  # use chat_id as session until explicit session_id
+                    role=role,
+                    content=content,
+                    message_index=msg_index,
+                    metadata_json=json.dumps(
+                        {"timestamp": datetime.now(timezone.utc).isoformat()},
+                        ensure_ascii=False,
+                    ),
+                )
+                session.add(row)
+                session.commit()
+        except Exception as exc:
+            logger.debug("Failed to persist message to DB (non-critical): %s", exc)
+
+    def _load_history_from_db(
+        self,
+        chat_id: str,
+        *,
+        limit: int = MAX_CONVERSATION_HISTORY,
+    ) -> list[dict]:
+        """Load recent messages from the DB."""
+        try:
+            from storage.models import ConversationSessionORM
+
+            with self._session_factory() as session:
+                rows = session.execute(
+                    select(ConversationSessionORM)
+                    .where(ConversationSessionORM.chat_id == chat_id)
+                    .order_by(ConversationSessionORM.created_at.desc())
+                    .limit(limit)
+                ).scalars().all()
+
+            # Reverse to get chronological order
+            rows = list(reversed(rows))
+            return [
+                {
+                    "role": r.role,
+                    "content": r.content,
+                    "timestamp": r.created_at.isoformat() if r.created_at else "",
+                }
+                for r in rows
+            ]
+        except Exception as exc:
+            logger.debug("Failed to load history from DB (non-critical): %s", exc)
+            return []
