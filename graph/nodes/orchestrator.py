@@ -11,6 +11,87 @@ from tools.workspace_priming import build_system_prompt
 
 logger = logging.getLogger(__name__)
 
+_repo = None
+_skill_service = None
+_profile_service = None
+
+
+def _get_repo():
+    global _repo
+    if _repo is None:
+        from storage.trusted_db import AgentDBRepository
+        _repo = AgentDBRepository()
+        _repo.initialize()
+    return _repo
+
+
+def _get_skill_service():
+    global _skill_service
+    if _skill_service is None:
+        from storage.skill_service import SkillService
+        repo = _get_repo()
+        _skill_service = SkillService(
+            repo._session_factory,
+            is_pg=repo.engine.dialect.name == "postgresql",
+        )
+    return _skill_service
+
+
+def _get_profile_service():
+    global _profile_service
+    if _profile_service is None:
+        from storage.user_profile_service import UserProfileService
+        repo = _get_repo()
+        _profile_service = UserProfileService(
+            repo._session_factory,
+            is_pg=repo.engine.dialect.name == "postgresql",
+        )
+    return _profile_service
+
+
+def _build_skill_context(user_text: str, *, limit: int = 3) -> str:
+    if not user_text.strip():
+        return ""
+    try:
+        rows = _get_skill_service().search_skills(user_text, limit=limit)
+    except Exception as exc:
+        logger.debug("Skill context unavailable: %s", exc)
+        return ""
+
+    if not rows:
+        return ""
+
+    lines = ["Relevant skill snippets:"]
+    for idx, row in enumerate(rows, 1):
+        title = (row.get("title") or "Untitled skill").strip()
+        chunk = (row.get("chunk_text") or "").strip().replace("\n", " ")
+        if len(chunk) > 240:
+            chunk = chunk[:240] + "..."
+        lines.append(f"{idx}. {title}: {chunk}")
+    return "\n".join(lines)
+
+
+def _build_profile_context(user_id: str, user_text: str, *, limit: int = 4) -> str:
+    if not user_id or not user_text.strip():
+        return ""
+    try:
+        rows = _get_profile_service().search_profile(user_id, user_text, limit=limit)
+    except Exception as exc:
+        logger.debug("Profile context unavailable: %s", exc)
+        return ""
+
+    if not rows:
+        return ""
+
+    lines = ["Relevant user profile facts:"]
+    for idx, row in enumerate(rows, 1):
+        key = (row.get("fact_key") or "fact").strip()
+        value = (row.get("fact_value") or "").strip().replace("\n", " ")
+        if len(value) > 180:
+            value = value[:180] + "..."
+        lines.append(f"{idx}. {key}: {value}")
+    return "\n".join(lines)
+
 _ORCHESTRATOR_PLAN_PROMPT = """\
 You must perform internal step-by-step reasoning (Chain-of-Thought),
 but you MUST NOT output any chain-of-thought. Output only strict JSON.
@@ -137,6 +218,15 @@ async def orchestrator_node(state: AgentState) -> dict:
         "Follow the workspace instruction pack and execute orchestration exactly.",
         model_role="orchestrator",
     )
+
+    user_id = str(state.get("user_id") or state.get("chat_id") or "default")
+    context_blocks = [
+        _build_skill_context(user_text),
+        _build_profile_context(user_id, user_text),
+    ]
+    context_blocks = [block for block in context_blocks if block]
+    if context_blocks:
+        full_system += "\n\n" + "\n\n".join(context_blocks)
 
     llm = get_llm(task_type="orchestrator", temperature=0.2)
 

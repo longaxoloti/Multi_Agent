@@ -36,6 +36,57 @@ from tools.ollama_manager import unload_model, load_context
 
 logger = logging.getLogger(__name__)
 
+_repo = None
+_bookmark_service = None
+
+
+def _get_repo():
+    global _repo
+    if _repo is None:
+        from storage.trusted_db import AgentDBRepository
+        _repo = AgentDBRepository()
+        _repo.initialize()
+    return _repo
+
+
+def _get_bookmark_service():
+    global _bookmark_service
+    if _bookmark_service is None:
+        from storage.bookmark_service import BookmarkService
+        repo = _get_repo()
+        _bookmark_service = BookmarkService(
+            repo._session_factory,
+            is_pg=repo.engine.dialect.name == "postgresql",
+        )
+    return _bookmark_service
+
+
+def _persist_research_sources(urls: list[str]) -> int:
+    """Persist discovered research URLs to knowledge.url_registry."""
+    if not urls:
+        return 0
+
+    saved = 0
+    try:
+        bookmark_service = _get_bookmark_service()
+    except Exception as exc:
+        logger.debug("Bookmark service unavailable; skip URL persistence: %s", exc)
+        return 0
+
+    for url in urls:
+        try:
+            domain = _normalize_domain(url)
+            trust = 0.8 if _is_allowlisted_domain(domain) else 0.55
+            bookmark_service.track_url(
+                url=url,
+                source_type="research",
+                trust_score=trust,
+            )
+            saved += 1
+        except Exception as exc:
+            logger.debug("Failed to persist research URL '%s': %s", url, exc)
+    return saved
+
 # DEBUG LOGGING
 DEBUG_RESEARCH = os.getenv("DEBUG_RESEARCH", "").lower() in {"1", "true", "yes"}
 DEBUG_LOG_FILE = Path("data/logs/research_debug.log") if DEBUG_RESEARCH else None
@@ -189,6 +240,11 @@ async def research_node(state: AgentState) -> dict:
     else:
         sources = re.findall(r'https?://[^\s"<>]+', collected_context)
         sources = list(dict.fromkeys(sources))[:10]
+
+    persisted_sources = _persist_research_sources(sources)
+    if persisted_sources:
+        logger.info("Persisted %d research source URL(s) into bookmarks.", persisted_sources)
+
     _debug_log("FINAL_RESULT", "final_sources_count", len(sources))
     _debug_log("FINAL_RESULT", "final_sources_list", sources)
 
