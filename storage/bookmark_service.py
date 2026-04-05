@@ -198,15 +198,15 @@ class BookmarkService:
     def search_bookmarks(self, query: str, *, limit: int = 5) -> list[dict]:
         """Semantic search over bookmarked URLs."""
         if not self._is_pg:
-            return self._search_fallback(query, limit=limit)
+            raise RuntimeError("Bookmark search requires PostgreSQL + pgvector")
 
         try:
             query_vector = self._embedder(
                 query, model=self._embedding_model, expected_dims=self._embedding_dims
             )
         except Exception as exc:
-            logger.error("Failed to embed query for bookmark search: %s", exc)
-            return []
+            logger.error("Failed to embed query for bookmark search: %s", exc, exc_info=True)
+            raise RuntimeError("Bookmark query embedding failed") from exc
 
         vector_literal = _to_vector_literal(query_vector)
         sql = """
@@ -241,28 +241,6 @@ class BookmarkService:
             }
             for row in rows
         ]
-
-    def _search_fallback(self, query: str, *, limit: int = 5) -> list[dict]:
-        """Keyword fallback for non-pgvector backends."""
-        query_lower = query.lower()
-        with self._session_factory() as session:
-            rows = session.execute(select(UrlRegistryORM)).scalars().all()
-            results = []
-            for r in rows:
-                searchable = f"{r.url} {r.title or ''} {r.description or ''}".lower()
-                if query_lower in searchable:
-                    results.append({
-                        "id": r.id,
-                        "url": r.url,
-                        "domain": r.domain,
-                        "title": r.title,
-                        "description": r.description,
-                        "source_type": r.source_type,
-                        "trust_score": r.trust_score,
-                        "access_count": 0,
-                        "distance": 0.0,
-                    })
-            return results[:limit]
 
     # ------------------------------------------------------------------
     # Getters

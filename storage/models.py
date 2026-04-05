@@ -106,7 +106,6 @@ class SkillSourceORM(Base):
     source_path: Mapped[Optional[str]] = mapped_column(String(512))
     source_hash: Mapped[Optional[str]] = mapped_column(String(128))
     title: Mapped[str] = mapped_column(String(255), nullable=False)
-    raw_content: Mapped[str] = mapped_column(Text, nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow, onupdate=_utcnow)
 
@@ -125,7 +124,6 @@ class SkillVersionORM(Base):
         String(64), ForeignKey("skills.skill_sources.id", ondelete="CASCADE"), nullable=False, index=True
     )
     version_no: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
-    canonical_content: Mapped[str] = mapped_column(Text, nullable=False)
     summary: Mapped[Optional[str]] = mapped_column(Text)
     status: Mapped[str] = mapped_column(String(20), nullable=False, default="active", index=True)
     confidence: Mapped[float] = mapped_column(Float, default=1.0)
@@ -200,7 +198,6 @@ class ProfileSourceORM(Base):
     id: Mapped[str] = mapped_column(String(64), primary_key=True, default=_new_uuid)
     source_type: Mapped[str] = mapped_column(String(40), nullable=False)
     source_hash: Mapped[Optional[str]] = mapped_column(String(128))
-    raw_content: Mapped[str] = mapped_column(Text, nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
 
 

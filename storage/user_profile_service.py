@@ -87,7 +87,6 @@ class UserProfileService:
                 id=_new_uuid(),
                 source_type="user_md",
                 source_hash=content_hash,
-                raw_content=raw_content,
             )
             session.add(source)
             session.flush()
@@ -289,15 +288,15 @@ class UserProfileService:
     ) -> list[dict]:
         """Semantic search over a user's profile facts."""
         if not self._is_pg:
-            return self._search_fallback(user_id, query, limit=limit)
+            raise RuntimeError("Profile search requires PostgreSQL + pgvector")
 
         try:
             query_vector = self._embedder(
                 query, model=self._embedding_model, expected_dims=self._embedding_dims
             )
         except Exception as exc:
-            logger.error("Failed to embed query for profile search: %s", exc)
-            return []
+            logger.error("Failed to embed query for profile search: %s", exc, exc_info=True)
+            raise RuntimeError("Profile query embedding failed") from exc
 
         vector_literal = _to_vector_literal(query_vector)
         sql = """
@@ -329,30 +328,6 @@ class UserProfileService:
             }
             for row in rows
         ]
-
-    def _search_fallback(self, user_id: str, query: str, *, limit: int = 5) -> list[dict]:
-        """Keyword fallback for non-pgvector backends."""
-        query_lower = query.lower()
-        with self._session_factory() as session:
-            rows = session.execute(
-                select(ProfileFactORM).where(
-                    ProfileFactORM.user_id == user_id,
-                    ProfileFactORM.status == "active",
-                )
-            ).scalars().all()
-
-            results = []
-            for r in rows:
-                searchable = f"{r.fact_key} {r.fact_value}".lower()
-                if query_lower in searchable:
-                    results.append({
-                        "id": r.id,
-                        "fact_key": r.fact_key,
-                        "fact_value": r.fact_value,
-                        "confidence": r.confidence,
-                        "distance": 0.0,
-                    })
-            return results[:limit]
 
     # ------------------------------------------------------------------
     # Mark fact as superseded

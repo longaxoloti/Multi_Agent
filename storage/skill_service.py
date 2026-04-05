@@ -111,7 +111,6 @@ class SkillService:
                     }
 
                 # Content changed — update source, create new version
-                existing_source.raw_content = raw_content
                 existing_source.source_hash = content_hash
                 existing_source.updated_at = _utcnow()
                 session.add(existing_source)
@@ -144,7 +143,6 @@ class SkillService:
                     source_path=str(path),
                     source_hash=content_hash,
                     title=skill_title,
-                    raw_content=raw_content,
                 )
                 session.add(source)
                 session.flush()
@@ -157,7 +155,6 @@ class SkillService:
                 id=_new_uuid(),
                 skill_source_id=source_id,
                 version_no=new_version_no,
-                canonical_content=raw_content,
                 summary=skill_title,
                 status="active",
                 confidence=1.0,
@@ -272,7 +269,6 @@ class SkillService:
                 id=_new_uuid(),
                 skill_source_id=source_id,
                 version_no=new_version_no,
-                canonical_content=new_content,
                 summary=summary or f"Optimized version {new_version_no}",
                 status="active",
                 confidence=0.9,
@@ -344,15 +340,15 @@ class SkillService:
     ) -> list[dict]:
         """Semantic search over active skill chunks using pgvector."""
         if not self._is_pg:
-            return self._search_skills_fallback(query, limit=limit, status=status)
+            raise RuntimeError("Skill search requires PostgreSQL + pgvector")
 
         try:
             query_vector = self._embedder(
                 query, model=self._embedding_model, expected_dims=self._embedding_dims
             )
         except Exception as exc:
-            logger.error("Failed to embed query for skill search: %s", exc)
-            return []
+            logger.error("Failed to embed query for skill search: %s", exc, exc_info=True)
+            raise RuntimeError("Skill query embedding failed") from exc
 
         vector_literal = _to_vector_literal(query_vector)
         sql = """
@@ -397,35 +393,6 @@ class SkillService:
             for row in rows
         ]
 
-    def _search_skills_fallback(
-        self, query: str, *, limit: int = 5, status: str = "active"
-    ) -> list[dict]:
-        """Fallback keyword search for non-pgvector backends."""
-        query_lower = query.lower()
-        with self._session_factory() as session:
-            versions = session.execute(
-                select(SkillVersionORM).where(SkillVersionORM.status == status)
-            ).scalars().all()
-
-            results = []
-            for v in versions:
-                if query_lower in v.canonical_content.lower():
-                    source = session.execute(
-                        select(SkillSourceORM).where(SkillSourceORM.id == v.skill_source_id)
-                    ).scalars().first()
-                    results.append({
-                        "source_id": v.skill_source_id,
-                        "version_id": v.id,
-                        "title": source.title if source else "",
-                        "source_path": source.source_path if source else "",
-                        "summary": v.summary,
-                        "version_no": v.version_no,
-                        "chunk_text": v.canonical_content[:500],
-                        "chunk_index": 0,
-                        "distance": 0.0,
-                    })
-            return results[:limit]
-
     # ------------------------------------------------------------------
     # Getters
     # ------------------------------------------------------------------
@@ -456,7 +423,7 @@ class SkillService:
             ]
 
     def get_skill_content(self, source_id: str, *, version: Optional[int] = None) -> Optional[dict]:
-        """Get full content of a skill by source ID, optionally specific version."""
+        """Get content of a skill by reconstructing from chunks (no longer stored as canonical_content)."""
         with self._session_factory() as session:
             source = session.execute(
                 select(SkillSourceORM).where(SkillSourceORM.id == source_id)
@@ -482,13 +449,21 @@ class SkillService:
             if not ver:
                 return None
 
+            # Reconstruct content from chunks
+            chunks = session.execute(
+                select(SkillChunkORM).where(
+                    SkillChunkORM.skill_version_id == ver.id
+                ).order_by(SkillChunkORM.chunk_index)
+            ).scalars().all()
+            reconstructed_content = "\n\n".join(c.chunk_text for c in chunks)
+
             return {
                 "source_id": source.id,
                 "title": source.title,
                 "source_path": source.source_path,
                 "version_id": ver.id,
                 "version_no": ver.version_no,
-                "content": ver.canonical_content,
+                "content": reconstructed_content,
                 "summary": ver.summary,
                 "status": ver.status,
                 "confidence": ver.confidence,

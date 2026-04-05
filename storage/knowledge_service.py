@@ -67,9 +67,8 @@ class KnowledgeService:
             self._repo_ready = True
         except Exception as exc:
             self._repo_ready = False
-            logger.warning("Knowledge DB unavailable: %s", exc)
-            if self._db_required:
-                raise
+            logger.error("Knowledge DB unavailable: %s", exc, exc_info=True)
+            raise RuntimeError("Knowledge DB/pgvector initialization failed") from exc
 
     @property
     def can_use_db(self) -> bool:
@@ -116,10 +115,12 @@ class KnowledgeService:
         }
 
     def get(self, *, chat_id: str, record_id: str) -> Optional[dict]:
-        if self.can_use_db:
-            item = self._repo.get_knowledge_record(record_id=record_id, chat_id=str(chat_id))
-            if item:
-                return self._serialize_record(item)
+        if not self.can_use_db:
+            raise RuntimeError("Knowledge database is not available")
+
+        item = self._repo.get_knowledge_record(record_id=record_id, chat_id=str(chat_id))
+        if item:
+            return self._serialize_record(item)
         return None
 
     def search(
@@ -131,7 +132,7 @@ class KnowledgeService:
         category: Optional[str] = None,
     ) -> list[dict]:
         if not self.can_use_db:
-            return []
+            raise RuntimeError("Knowledge database is not available")
 
         safe_limit = max(1, min(limit, KNOWLEDGE_MAX_SEARCH_RESULTS))
         query_embedding = self._build_embedding((query or "").strip())
@@ -167,18 +168,19 @@ class KnowledgeService:
         category: Optional[str] = None,
     ) -> list[dict]:
         safe_limit = max(1, min(limit, KNOWLEDGE_MAX_RECENT_ITEMS))
-        if self.can_use_db:
-            items = self._repo.list_knowledge_records(
-                chat_id=str(chat_id),
-                limit=safe_limit,
-                category=category,
-            )
-            return [self._serialize_record(item) for item in items]
-        return []
+        if not self.can_use_db:
+            raise RuntimeError("Knowledge database is not available")
+
+        items = self._repo.list_knowledge_records(
+            chat_id=str(chat_id),
+            limit=safe_limit,
+            category=category,
+        )
+        return [self._serialize_record(item) for item in items]
 
     def delete(self, *, chat_id: str, record_id: str) -> bool:
         if not self.can_use_db:
-            return False
+            raise RuntimeError("Knowledge database is not available")
         return self._repo.delete_knowledge_record(record_id=record_id, chat_id=str(chat_id))
 
     def _build_embedding(self, text: str) -> list[float]:

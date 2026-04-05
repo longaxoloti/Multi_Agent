@@ -72,7 +72,6 @@ CREATE TABLE IF NOT EXISTS skills.skill_sources (
     source_path     VARCHAR(512),
     source_hash     VARCHAR(128),
     title           VARCHAR(255) NOT NULL,
-    raw_content     TEXT         NOT NULL,
     created_at      TIMESTAMPTZ  NOT NULL DEFAULT now(),
     updated_at      TIMESTAMPTZ  NOT NULL DEFAULT now()
 );
@@ -82,7 +81,6 @@ CREATE TABLE IF NOT EXISTS skills.skill_versions (
     id              UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     skill_source_id UUID         NOT NULL REFERENCES skills.skill_sources(id) ON DELETE CASCADE,
     version_no      INTEGER      NOT NULL DEFAULT 1,
-    canonical_content TEXT       NOT NULL,
     summary         TEXT,
     status          VARCHAR(20)  NOT NULL DEFAULT 'active',  -- active, deprecated, draft
     confidence      FLOAT        DEFAULT 1.0,
@@ -130,7 +128,6 @@ CREATE TABLE IF NOT EXISTS profile.profile_sources (
     id              UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     source_type     VARCHAR(40)  NOT NULL,   -- user_md, conversation, user_edit, agent_inference
     source_hash     VARCHAR(128),
-    raw_content     TEXT         NOT NULL,
     created_at      TIMESTAMPTZ  NOT NULL DEFAULT now()
 );
 

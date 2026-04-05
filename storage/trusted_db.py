@@ -36,24 +36,6 @@ class TrustedClaimORM(Base):
     last_verified_at: Mapped[datetime] = mapped_column(DateTime(timezone=False), index=True)
 
 
-class UserKnowledgeRecordORM(Base):
-    """Legacy table — kept for backward compat. New data uses schema-specific tables."""
-    __tablename__ = "user_knowledge_records"
-
-    id: Mapped[str] = mapped_column(String(64), primary_key=True)
-    chat_id: Mapped[str] = mapped_column(String(120), index=True)
-    category: Mapped[str] = mapped_column(String(40), index=True)
-    title: Mapped[str] = mapped_column(String(255), default="")
-    content: Mapped[str] = mapped_column(Text)
-    tags_json: Mapped[str] = mapped_column(Text, default="[]")
-    metadata_json: Mapped[str] = mapped_column(Text, default="{}")
-    embedding_model: Mapped[str] = mapped_column(String(80), default="")
-    embedding_dims: Mapped[int] = mapped_column(Integer, default=0)
-    embedding_json: Mapped[str] = mapped_column(Text, default="[]")
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=False), index=True)
-    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=False), index=True)
-
-
 # ---------------------------------------------------------------------------
 # Dataclasses (public API)
 # ---------------------------------------------------------------------------
@@ -143,13 +125,34 @@ class AgentDBRepository:
 
         logger.info("Agent DB schema ready (all schemas initialized)")
 
+    def _get_column_names(self, table_name: str, *, schema: Optional[str] = None) -> set[str]:
+        """Return table column names without reflecting pgvector types via SQLAlchemy inspector."""
+        if self.engine.dialect.name == "postgresql":
+            table_schema = schema or "public"
+            with self.engine.begin() as conn:
+                rows = conn.execute(
+                    text(
+                        """
+                        SELECT column_name
+                        FROM information_schema.columns
+                        WHERE table_schema = :table_schema
+                          AND table_name = :table_name
+                        """
+                    ),
+                    {"table_schema": table_schema, "table_name": table_name},
+                ).all()
+            return {row[0] for row in rows}
+
+        inspector = inspect(self.engine)
+        cols = inspector.get_columns(table_name, schema=schema)
+        return {col["name"] for col in cols}
+
     def _ensure_vector_columns(self) -> None:
         """Add pgvector columns to embedding tables if they don't exist yet."""
-        inspector = inspect(self.engine)
         with self.engine.begin() as conn:
             for table_name, schema, col_name, dims in _VECTOR_COLUMNS:
                 try:
-                    cols = {c["name"] for c in inspector.get_columns(table_name, schema=schema)}
+                    cols = self._get_column_names(table_name, schema=schema)
                 except Exception:
                     continue  # table doesn't exist yet
                 if col_name not in cols:
@@ -183,7 +186,8 @@ class AgentDBRepository:
                         """
                         SELECT 1
                         FROM information_schema.columns
-                        WHERE table_name = 'user_knowledge_records'
+                                                WHERE table_schema = 'manual'
+                                                    AND table_name = 'saved_embeddings'
                           AND column_name = 'embedding'
                         LIMIT 1
                         """
@@ -202,7 +206,7 @@ class AgentDBRepository:
         dialect = self.engine.dialect.name
         with self.engine.begin() as conn:
             if "trusted_claims" in table_names:
-                cols = {col["name"] for col in inspector.get_columns("trusted_claims")}
+                cols = self._get_column_names("trusted_claims")
                 normalized_exists = "normalized_claim" in cols
                 claim_embedding_exists = "claim_embedding_json" in cols
 
@@ -230,28 +234,6 @@ class AgentDBRepository:
                     else:
                         logger.warning("Unsupported dialect for embedding column migration: %s", dialect)
                         return
-
-            if "user_knowledge_records" in table_names:
-                knowledge_cols = {col["name"] for col in inspector.get_columns("user_knowledge_records")}
-                if "embedding_model" not in knowledge_cols:
-                    if dialect == "postgresql":
-                        conn.execute(text("ALTER TABLE user_knowledge_records ADD COLUMN IF NOT EXISTS embedding_model VARCHAR(80) DEFAULT ''"))
-                    elif dialect == "sqlite":
-                        conn.execute(text("ALTER TABLE user_knowledge_records ADD COLUMN embedding_model VARCHAR(80) DEFAULT ''"))
-                if "embedding_dims" not in knowledge_cols:
-                    if dialect == "postgresql":
-                        conn.execute(text("ALTER TABLE user_knowledge_records ADD COLUMN IF NOT EXISTS embedding_dims INTEGER DEFAULT 0"))
-                    elif dialect == "sqlite":
-                        conn.execute(text("ALTER TABLE user_knowledge_records ADD COLUMN embedding_dims INTEGER DEFAULT 0"))
-                if "embedding_json" not in knowledge_cols:
-                    if dialect == "postgresql":
-                        conn.execute(text("ALTER TABLE user_knowledge_records ADD COLUMN IF NOT EXISTS embedding_json TEXT DEFAULT '[]'"))
-                    elif dialect == "sqlite":
-                        conn.execute(text("ALTER TABLE user_knowledge_records ADD COLUMN embedding_json TEXT DEFAULT '[]'"))
-                if dialect == "postgresql":
-                    conn.execute(text("CREATE EXTENSION IF NOT EXISTS vector"))
-                    conn.execute(text("ALTER TABLE user_knowledge_records ADD COLUMN IF NOT EXISTS embedding vector(1024)"))
-                    conn.execute(text("CREATE INDEX IF NOT EXISTS idx_user_knowledge_embedding_ivfflat ON user_knowledge_records USING ivfflat (embedding vector_cosine_ops) WITH (lists = 100)"))
 
     @staticmethod
     def _normalize_claim(text: str) -> str:
@@ -447,66 +429,144 @@ class AgentDBRepository:
         embedding: Optional[list[float]] = None,
         record_id: Optional[str] = None,
     ) -> str:
+        if self.engine.dialect.name != "postgresql":
+            raise RuntimeError("Knowledge vector storage requires PostgreSQL + pgvector")
+
         now = datetime.utcnow()
         final_id = record_id or f"k_{uuid.uuid4().hex}"
-        item = UserKnowledgeRecordORM(
-            id=final_id,
-            chat_id=str(chat_id),
-            category=(category or "note").strip().lower(),
-            title=(title or "").strip()[:255],
-            content=content,
-            tags_json=json.dumps(tags or [], ensure_ascii=False),
-            metadata_json=json.dumps(metadata or {}, ensure_ascii=False),
-            embedding_model=(embedding_model or "").strip(),
-            embedding_dims=int(embedding_dims or 0),
-            embedding_json=json.dumps(embedding or [], ensure_ascii=False),
-            created_at=now,
-            updated_at=now,
-        )
-        with self._session_factory() as session:
-            session.add(item)
-            session.commit()
+        source_id = f"s_{uuid.uuid4().hex}"
+        embedding_id = f"e_{uuid.uuid4().hex}"
+        payload = {
+            "tags": tags or [],
+            "metadata": metadata or {},
+        }
 
-        if embedding and self.engine.dialect.name == "postgresql":
-            vector_literal = self._to_vector_literal(embedding)
-            with self.engine.begin() as conn:
+        with self.engine.begin() as conn:
+            conn.execute(
+                text(
+                    """
+                    INSERT INTO manual.saved_sources (
+                        id, command_text, request_id, user_id, chat_id, created_at
+                    ) VALUES (
+                        :id, :command_text, :request_id, :user_id, :chat_id, :created_at
+                    )
+                    """
+                ),
+                {
+                    "id": source_id,
+                    "command_text": json.dumps(payload, ensure_ascii=False),
+                    "request_id": None,
+                    "user_id": str(chat_id),
+                    "chat_id": str(chat_id),
+                    "created_at": now,
+                },
+            )
+
+            conn.execute(
+                text(
+                    """
+                    INSERT INTO manual.saved_facts (
+                        id, saved_source_id, category, title, fact_key,
+                        fact_value, status, provenance_type, created_at, updated_at
+                    ) VALUES (
+                        :id, :saved_source_id, :category, :title, :fact_key,
+                        :fact_value, 'active', 'user_direct_save', :created_at, :updated_at
+                    )
+                    """
+                ),
+                {
+                    "id": final_id,
+                    "saved_source_id": source_id,
+                    "category": (category or "note").strip().lower(),
+                    "title": (title or "").strip()[:255],
+                    "fact_key": None,
+                    "fact_value": content,
+                    "created_at": now,
+                    "updated_at": now,
+                },
+            )
+
+            if embedding:
                 conn.execute(
                     text(
                         """
-                        UPDATE user_knowledge_records
-                        SET embedding = CAST(:embedding_literal AS vector)
-                        WHERE id = :record_id
+                        INSERT INTO manual.saved_embeddings (
+                            id, saved_fact_id, embedding_json, model_name, created_at
+                        ) VALUES (
+                            :id, :saved_fact_id, :embedding_json, :model_name, :created_at
+                        )
                         """
                     ),
                     {
-                        "embedding_literal": vector_literal,
-                        "record_id": final_id,
+                        "id": embedding_id,
+                        "saved_fact_id": final_id,
+                        "embedding_json": "[]",
+                        "model_name": (embedding_model or "").strip() or "bge-m3",
+                        "created_at": now,
+                    },
+                )
+                conn.execute(
+                    text(
+                        """
+                        UPDATE manual.saved_embeddings
+                        SET embedding = CAST(:embedding_literal AS vector)
+                        WHERE id = :embedding_id
+                        """
+                    ),
+                    {
+                        "embedding_literal": self._to_vector_literal(embedding),
+                        "embedding_id": embedding_id,
                     },
                 )
         return final_id
 
     def get_knowledge_record(self, record_id: str, chat_id: Optional[str] = None) -> Optional[UserKnowledgeRecord]:
-        with self._session_factory() as session:
-            row = session.execute(
-                select(UserKnowledgeRecordORM).where(UserKnowledgeRecordORM.id == record_id)
-            ).scalars().first()
+        if self.engine.dialect.name != "postgresql":
+            raise RuntimeError("Knowledge retrieval requires PostgreSQL + pgvector")
+
+        with self.engine.begin() as conn:
+            row = conn.execute(
+                text(
+                    """
+                    SELECT
+                        sf.id,
+                        ss.chat_id,
+                        sf.category,
+                        sf.title,
+                        sf.fact_value AS content,
+                        ss.command_text,
+                        COALESCE(se.model_name, '') AS embedding_model,
+                        sf.created_at,
+                        sf.updated_at
+                    FROM manual.saved_facts sf
+                    JOIN manual.saved_sources ss ON ss.id = sf.saved_source_id
+                    LEFT JOIN manual.saved_embeddings se ON se.saved_fact_id = sf.id
+                    WHERE sf.id = :record_id
+                    LIMIT 1
+                    """
+                ),
+                {"record_id": record_id},
+            ).mappings().first()
+
         if not row:
             return None
-        if chat_id and str(row.chat_id) != str(chat_id):
+        if chat_id and str(row["chat_id"]) != str(chat_id):
             return None
+
+        source_payload = self._safe_json_loads(row.get("command_text"), {})
         return UserKnowledgeRecord(
-            id=row.id,
-            chat_id=row.chat_id,
-            category=row.category,
-            title=row.title,
-            content=row.content,
-            tags=self._safe_json_loads(row.tags_json, []),
-            metadata=self._safe_json_loads(row.metadata_json, {}),
-            embedding_model=row.embedding_model or "",
-            embedding_dims=int(row.embedding_dims or 0),
-            embedding=self._safe_json_loads(row.embedding_json, []),
-            created_at=row.created_at,
-            updated_at=row.updated_at,
+            id=row["id"],
+            chat_id=row["chat_id"],
+            category=row["category"],
+            title=row["title"] or "",
+            content=row["content"],
+            tags=source_payload.get("tags", []),
+            metadata=source_payload.get("metadata", {}),
+            embedding_model=row["embedding_model"],
+            embedding_dims=0,
+            embedding=[],
+            created_at=row["created_at"],
+            updated_at=row["updated_at"],
         )
 
     def list_knowledge_records(
@@ -516,34 +576,55 @@ class AgentDBRepository:
         limit: int = 10,
         category: Optional[str] = None,
     ) -> list[UserKnowledgeRecord]:
-        stmt = (
-            select(UserKnowledgeRecordORM)
-            .where(UserKnowledgeRecordORM.chat_id == str(chat_id))
-            .order_by(UserKnowledgeRecordORM.created_at.desc())
-            .limit(max(1, min(limit, 100)))
-        )
-        if category:
-            stmt = stmt.where(UserKnowledgeRecordORM.category == category.strip().lower())
+        if self.engine.dialect.name != "postgresql":
+            raise RuntimeError("Knowledge retrieval requires PostgreSQL + pgvector")
 
-        with self._session_factory() as session:
-            rows = session.execute(stmt).scalars().all()
+        safe_limit = max(1, min(limit, 100))
+        normalized_category = (category or "").strip().lower() or None
+
+        sql = """
+            SELECT
+                sf.id,
+                ss.chat_id,
+                sf.category,
+                sf.title,
+                sf.fact_value AS content,
+                ss.command_text,
+                COALESCE(se.model_name, '') AS embedding_model,
+                sf.created_at,
+                sf.updated_at
+            FROM manual.saved_facts sf
+            JOIN manual.saved_sources ss ON ss.id = sf.saved_source_id
+            LEFT JOIN manual.saved_embeddings se ON se.saved_fact_id = sf.id
+            WHERE ss.chat_id = :chat_id
+              AND sf.status = 'active'
+        """
+        params: dict = {"chat_id": str(chat_id), "limit": safe_limit}
+        if normalized_category:
+            sql += " AND sf.category = :category"
+            params["category"] = normalized_category
+        sql += " ORDER BY sf.created_at DESC LIMIT :limit"
+
+        with self.engine.begin() as conn:
+            rows = conn.execute(text(sql), params).mappings().all()
 
         results: list[UserKnowledgeRecord] = []
         for row in rows:
+            source_payload = self._safe_json_loads(row.get("command_text"), {})
             results.append(
                 UserKnowledgeRecord(
-                    id=row.id,
-                    chat_id=row.chat_id,
-                    category=row.category,
-                    title=row.title,
-                    content=row.content,
-                    tags=self._safe_json_loads(row.tags_json, []),
-                    metadata=self._safe_json_loads(row.metadata_json, {}),
-                    embedding_model=row.embedding_model or "",
-                    embedding_dims=int(row.embedding_dims or 0),
-                    embedding=self._safe_json_loads(row.embedding_json, []),
-                    created_at=row.created_at,
-                    updated_at=row.updated_at,
+                    id=row["id"],
+                    chat_id=row["chat_id"],
+                    category=row["category"],
+                    title=row["title"] or "",
+                    content=row["content"],
+                    tags=source_payload.get("tags", []),
+                    metadata=source_payload.get("metadata", {}),
+                    embedding_model=row["embedding_model"],
+                    embedding_dims=0,
+                    embedding=[],
+                    created_at=row["created_at"],
+                    updated_at=row["updated_at"],
                 )
             )
         return results
@@ -557,44 +638,70 @@ class AgentDBRepository:
         categories: Optional[list[str]] = None,
         limit: int = 200,
     ) -> list[UserKnowledgeRecord]:
-        stmt = (
-            select(UserKnowledgeRecordORM)
-            .where(UserKnowledgeRecordORM.created_at >= start)
-            .where(UserKnowledgeRecordORM.created_at < end)
-            .order_by(UserKnowledgeRecordORM.created_at.desc())
-            .limit(max(1, min(limit, 1000)))
-        )
+        if self.engine.dialect.name != "postgresql":
+            raise RuntimeError("Knowledge retrieval requires PostgreSQL + pgvector")
 
-        if chat_id:
-            stmt = stmt.where(UserKnowledgeRecordORM.chat_id == str(chat_id))
-
+        safe_limit = max(1, min(limit, 1000))
         normalized_categories = [
             item.strip().lower()
             for item in (categories or [])
             if item and item.strip()
         ]
-        if normalized_categories:
-            stmt = stmt.where(UserKnowledgeRecordORM.category.in_(normalized_categories))
 
-        with self._session_factory() as session:
-            rows = session.execute(stmt).scalars().all()
+        sql = """
+            SELECT
+                sf.id,
+                ss.chat_id,
+                sf.category,
+                sf.title,
+                sf.fact_value AS content,
+                ss.command_text,
+                COALESCE(se.model_name, '') AS embedding_model,
+                sf.created_at,
+                sf.updated_at
+            FROM manual.saved_facts sf
+            JOIN manual.saved_sources ss ON ss.id = sf.saved_source_id
+            LEFT JOIN manual.saved_embeddings se ON se.saved_fact_id = sf.id
+            WHERE sf.created_at >= :start
+              AND sf.created_at < :end
+              AND sf.status = 'active'
+        """
+        params: dict = {
+            "start": start,
+            "end": end,
+            "limit": safe_limit,
+        }
+
+        if chat_id:
+            sql += " AND ss.chat_id = :chat_id"
+            params["chat_id"] = str(chat_id)
+
+        if normalized_categories:
+            sql += " AND sf.category = ANY(:categories)"
+            params["categories"] = normalized_categories
+
+        sql += " ORDER BY sf.created_at DESC LIMIT :limit"
+
+        with self.engine.begin() as conn:
+            rows = conn.execute(text(sql), params).mappings().all()
 
         results: list[UserKnowledgeRecord] = []
         for row in rows:
+            source_payload = self._safe_json_loads(row.get("command_text"), {})
             results.append(
                 UserKnowledgeRecord(
-                    id=row.id,
-                    chat_id=row.chat_id,
-                    category=row.category,
-                    title=row.title,
-                    content=row.content,
-                    tags=self._safe_json_loads(row.tags_json, []),
-                    metadata=self._safe_json_loads(row.metadata_json, {}),
-                    embedding_model=row.embedding_model or "",
-                    embedding_dims=int(row.embedding_dims or 0),
-                    embedding=self._safe_json_loads(row.embedding_json, []),
-                    created_at=row.created_at,
-                    updated_at=row.updated_at,
+                    id=row["id"],
+                    chat_id=row["chat_id"],
+                    category=row["category"],
+                    title=row["title"] or "",
+                    content=row["content"],
+                    tags=source_payload.get("tags", []),
+                    metadata=source_payload.get("metadata", {}),
+                    embedding_model=row["embedding_model"],
+                    embedding_dims=0,
+                    embedding=[],
+                    created_at=row["created_at"],
+                    updated_at=row["updated_at"],
                 )
             )
         return results
@@ -632,93 +739,83 @@ class AgentDBRepository:
         limit: int = 5,
         category: Optional[str] = None,
     ) -> list[dict]:
+        if self.engine.dialect.name != "postgresql":
+            raise RuntimeError("Knowledge semantic search requires PostgreSQL + pgvector")
+
         safe_limit = max(1, min(limit, 100))
         normalized_category = (category or "").strip().lower() or None
+        query_vector = self._to_vector_literal(query_embedding)
+        base_sql = """
+            SELECT
+                sf.id,
+                ss.chat_id,
+                sf.category,
+                sf.title,
+                sf.fact_value AS content,
+                ss.command_text,
+                COALESCE(se.model_name, '') AS embedding_model,
+                sf.created_at,
+                sf.updated_at,
+                (se.embedding <=> CAST(:query_vector AS vector)) AS distance
+            FROM manual.saved_embeddings se
+            JOIN manual.saved_facts sf ON sf.id = se.saved_fact_id
+            JOIN manual.saved_sources ss ON ss.id = sf.saved_source_id
+            WHERE ss.chat_id = :chat_id
+              AND sf.status = 'active'
+              AND se.embedding IS NOT NULL
+        """
+        params: dict = {
+            "query_vector": query_vector,
+            "chat_id": str(chat_id),
+            "limit": safe_limit,
+        }
+        if normalized_category:
+            base_sql += " AND sf.category = :category "
+            params["category"] = normalized_category
+        base_sql += " ORDER BY se.embedding <=> CAST(:query_vector AS vector) ASC LIMIT :limit"
 
-        if self.engine.dialect.name == "postgresql":
-            query_vector = self._to_vector_literal(query_embedding)
-            base_sql = """
-                SELECT
-                    id, chat_id, category, title, content,
-                    tags_json, metadata_json, embedding_model, embedding_dims, embedding_json,
-                    created_at, updated_at,
-                    (embedding <=> CAST(:query_vector AS vector)) AS distance
-                FROM user_knowledge_records
-                WHERE chat_id = :chat_id
-                  AND embedding IS NOT NULL
-            """
-            params: dict = {
-                "query_vector": query_vector,
-                "chat_id": str(chat_id),
-                "limit": safe_limit,
-            }
-            if normalized_category:
-                base_sql += " AND category = :category "
-                params["category"] = normalized_category
-            base_sql += " ORDER BY embedding <=> CAST(:query_vector AS vector) ASC LIMIT :limit"
+        with self.engine.begin() as conn:
+            rows = conn.execute(text(base_sql), params).mappings().all()
 
-            with self.engine.begin() as conn:
-                rows = conn.execute(text(base_sql), params).mappings().all()
-
-            return [
+        results: list[dict] = []
+        for row in rows:
+            source_payload = self._safe_json_loads(row.get("command_text"), {})
+            results.append(
                 {
                     "id": row["id"],
                     "chat_id": row["chat_id"],
                     "category": row["category"],
                     "title": row["title"],
                     "content": row["content"],
-                    "metadata": self._safe_json_loads(row.get("metadata_json"), {}),
-                    "tags": self._safe_json_loads(row.get("tags_json"), []),
+                    "metadata": source_payload.get("metadata", {}),
+                    "tags": source_payload.get("tags", []),
                     "distance": float(row.get("distance") or 0.0),
                     "embedding_model": row.get("embedding_model") or "",
-                    "embedding_dims": int(row.get("embedding_dims") or 0),
+                    "embedding_dims": len(query_embedding),
                     "created_at": row["created_at"],
                     "updated_at": row["updated_at"],
                 }
-                for row in rows
-            ]
-
-        candidates = self.list_knowledge_records(
-            chat_id=str(chat_id),
-            limit=1000,
-            category=normalized_category,
-        )
-        scored: list[dict] = []
-        for item in candidates:
-            if not item.embedding:
-                continue
-            distance = self._cosine_distance(query_embedding, item.embedding)
-            scored.append(
-                {
-                    "id": item.id,
-                    "chat_id": item.chat_id,
-                    "category": item.category,
-                    "title": item.title,
-                    "content": item.content,
-                    "metadata": item.metadata,
-                    "tags": item.tags,
-                    "distance": distance,
-                    "embedding_model": item.embedding_model,
-                    "embedding_dims": item.embedding_dims,
-                    "created_at": item.created_at,
-                    "updated_at": item.updated_at,
-                }
             )
-        scored.sort(key=lambda row: row["distance"])
-        return scored[:safe_limit]
+        return results
 
     def delete_knowledge_record(self, record_id: str, chat_id: Optional[str] = None) -> bool:
-        with self._session_factory() as session:
-            row = session.execute(
-                select(UserKnowledgeRecordORM).where(UserKnowledgeRecordORM.id == record_id)
-            ).scalars().first()
-            if not row:
-                return False
-            if chat_id and str(row.chat_id) != str(chat_id):
-                return False
-            session.delete(row)
-            session.commit()
-            return True
+        if self.engine.dialect.name != "postgresql":
+            raise RuntimeError("Knowledge deletion requires PostgreSQL + pgvector")
+
+        sql = """
+            DELETE FROM manual.saved_facts sf
+            USING manual.saved_sources ss
+            WHERE sf.id = :record_id
+              AND ss.id = sf.saved_source_id
+        """
+        params: dict = {"record_id": record_id}
+        if chat_id:
+            sql += " AND ss.chat_id = :chat_id"
+            params["chat_id"] = str(chat_id)
+
+        with self.engine.begin() as conn:
+            result = conn.execute(text(sql), params)
+            return result.rowcount > 0
 
 
 # Backward-compatible alias
