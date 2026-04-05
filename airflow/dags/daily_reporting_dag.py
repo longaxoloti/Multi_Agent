@@ -57,7 +57,7 @@ def _send_telegram_message(message: str) -> None:
 )
 def daily_user_knowledge_report_dag():
     @task
-    def gather_user_knowledge_records() -> list[dict]:
+    def gather_manual_knowledge_records() -> list[dict]:
         context = get_current_context()
         interval_start = context.get("data_interval_start")
         interval_end = context.get("data_interval_end")
@@ -119,6 +119,6 @@ def daily_user_knowledge_report_dag():
     def notify(report_text: str) -> None:
         _send_telegram_message(report_text)
 
-    notify(summarize(gather_user_knowledge_records()))
+    notify(summarize(gather_manual_knowledge_records()))
 
 dag = daily_user_knowledge_report_dag()
