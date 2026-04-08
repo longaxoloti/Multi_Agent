@@ -22,7 +22,7 @@ while IFS= read -r line || [ -n "$line" ]; do
 done < .env
 
 eval "$(conda shell.bash hook)"
-conda activate agent-stock
+conda activate agent
 
 mkdir -p data/logs
 

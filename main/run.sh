@@ -23,9 +23,9 @@ fi
 
 # Activate conda and run
 eval "$(conda shell.bash hook)"
-conda activate agent-stock
+conda activate agent
 
-echo "✅ Conda environment 'agent-stock' activated"
+echo "✅ Conda environment 'agent' activated"
 echo "   Python: $(python --version)"
 echo ""
 

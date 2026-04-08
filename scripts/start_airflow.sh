@@ -14,7 +14,7 @@ if [ ! -f ".env" ]; then
 fi
 
 eval "$(conda shell.bash hook)"
-conda activate agent-stock
+conda activate agent
 
 export PYTHONPATH="$PROJECT_DIR:${PYTHONPATH:-}"
 

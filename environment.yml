@@ -1,4 +1,4 @@
-name: multi-agent
+name: agent
 channels:
   - conda-forge
   - defaults
