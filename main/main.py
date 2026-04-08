@@ -13,7 +13,7 @@ if str(PROJECT_ROOT) not in sys.path:
 from tools.workspace_priming import get_workspace_priming_context
 from telegram_bot.bot import TelegramBot
 
-DATA_DIR = PROJECT_ROOT / "data"
+DATA_DIR = Path.home() / ".tesla"
 LOGS_DIR = DATA_DIR / "logs"
 
 for d in [DATA_DIR, LOGS_DIR]:

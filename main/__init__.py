@@ -1,1 +1,1 @@
-"""Main package for app entrypoint and runtime config."""
+__version__ = "0.1.0"

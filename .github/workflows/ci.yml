@@ -1,0 +1,49 @@
+name: CI Workflow
+
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+    branches: [ "main" ]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    
+    # Optional Postgres service for integration tests
+    services:
+      postgres:
+        image: pgvector/pgvector:16
+        env:
+          POSTGRES_DB: agent_ai
+          POSTGRES_USER: agent
+          POSTGRES_PASSWORD: agent
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: "3.11"
+        cache: 'pip'
+
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install -r requirements.txt
+
+    - name: Test with pytest
+      env:
+        TRUSTED_DB_URL: postgresql+psycopg://agent:agent@localhost:5432/agent_ai
+      run: |
+        # Wait for DB if needed, and run schema setup
+        alembic -c infra/db/alembic.ini upgrade head
+        pytest tests/ -v
