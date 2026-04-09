@@ -137,7 +137,6 @@ WORKSPACE_PRIMING_FILE_SETS: dict[str, list[str]] = {
         "SOUL.md",
         "TOOLS.md",
         "USER.md",
-        "MODELS.md",
     ],
     "classifier": [
         "skills/Classifying/CLASSIFIER.md",

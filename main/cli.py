@@ -1,6 +1,8 @@
 import os
+import signal
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 import typer
@@ -49,6 +51,187 @@ def start():
     # Delay import to avoid loading everything on fast CLI commands
     from main.main import main
     main()
+
+
+def _read_pid_file(pid_path: Path) -> int | None:
+    if not pid_path.exists():
+        return None
+    try:
+        value = pid_path.read_text().strip()
+        if value.isdigit():
+            return int(value)
+    except OSError:
+        return None
+    return None
+
+
+def _pid_exists(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+        return True
+    except OSError:
+        return False
+
+
+def _terminate_pid(pid: int, grace_seconds: int = 3) -> tuple[bool, str]:
+    if pid <= 0:
+        return False, "invalid pid"
+    if not _pid_exists(pid):
+        return False, "not running"
+
+    try:
+        os.kill(pid, signal.SIGTERM)
+    except PermissionError:
+        return False, "permission denied"
+    except ProcessLookupError:
+        return False, "not running"
+
+    deadline = time.time() + max(grace_seconds, 0)
+    while time.time() < deadline:
+        if not _pid_exists(pid):
+            return True, "terminated"
+        time.sleep(0.2)
+
+    if _pid_exists(pid):
+        try:
+            os.kill(pid, signal.SIGKILL)
+        except PermissionError:
+            return False, "permission denied"
+        except ProcessLookupError:
+            return True, "terminated"
+
+    return (not _pid_exists(pid), "killed")
+
+
+def _iter_tesla_pid_files() -> list[Path]:
+    return [
+        PROJECT_ROOT / "data" / "logs" / "bot.pid",
+        PROJECT_ROOT / "data" / "logs" / "camofox.pid",
+        PROJECT_ROOT / "data" / "logs" / "camofox_mcp.pid",
+        PROJECT_ROOT / "data" / "logs" / "bot.run.lock" / "pid",
+        PROJECT_ROOT / "airflow_home" / "webserver.pid",
+        PROJECT_ROOT / "airflow_home" / "scheduler.pid",
+        LOG_DIR / "bot.instance.lock",
+    ]
+
+
+def _is_tesla_process(command: str) -> bool:
+    cmd = command.lower()
+    project_root = str(PROJECT_ROOT).lower()
+    airflow_home = str((PROJECT_ROOT / "airflow_home")).lower()
+    markers = [
+        "python -m main.main",
+        "python -m main.cli start",
+        "tesla start",
+        "com.geniuslab.tesla",
+        "camofox-mcp",
+        "camofox-browser",
+    ]
+
+    if project_root in cmd or airflow_home in cmd:
+        return True
+
+    if any(marker in cmd for marker in markers):
+        return True
+
+    # Airflow processes can be started outside project root, but are still Tesla-related.
+    if ("airflow webserver" in cmd or "airflow scheduler" in cmd) and "multi_agent" in cmd:
+        return True
+
+    return False
+
+
+def _collect_tesla_processes() -> list[tuple[int, str]]:
+    result = subprocess.run(
+        ["ps", "-axo", "pid=,command="],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    processes: list[tuple[int, str]] = []
+    if result.returncode != 0:
+        return processes
+
+    current_pid = os.getpid()
+    for line in result.stdout.splitlines():
+        raw = line.strip()
+        if not raw:
+            continue
+        parts = raw.split(maxsplit=1)
+        if len(parts) < 2 or not parts[0].isdigit():
+            continue
+        pid = int(parts[0])
+        command = parts[1]
+        if pid == current_pid:
+            continue
+        if _is_tesla_process(command):
+            processes.append((pid, command))
+    return processes
+
+
+@app.command()
+def stop(grace: int = typer.Option(3, "--grace", min=0, help="Grace period in seconds before force kill.")):
+    """Stop all Tesla-related processes and services."""
+    typer.echo("Stopping Tesla services and background processes...")
+
+    stopped: list[str] = []
+    skipped: list[str] = []
+
+    plist_path = USER_HOME / "Library" / "LaunchAgents" / "com.geniuslab.tesla.plist"
+    if plist_path.exists():
+        subprocess.run(["launchctl", "unload", str(plist_path)], check=False)
+        subprocess.run(["launchctl", "remove", "com.geniuslab.tesla"], check=False)
+        stopped.append("launchd service")
+    else:
+        skipped.append("launchd service (plist not found)")
+
+    stop_stack_script = PROJECT_ROOT / "scripts" / "stop_stack.sh"
+    if stop_stack_script.exists():
+        subprocess.run(["bash", str(stop_stack_script)], cwd=str(PROJECT_ROOT), check=False)
+        stopped.append("project stack script")
+    else:
+        skipped.append("project stack script (not found)")
+
+    db_compose = DB_DIR / "docker-compose.yml"
+    if db_compose.exists():
+        subprocess.run(["docker", "compose", "down", "--remove-orphans"], cwd=str(DB_DIR), check=False)
+        stopped.append("database containers")
+    else:
+        skipped.append("database containers (compose not found)")
+
+    pid_targets: set[int] = set()
+    for pid_file in _iter_tesla_pid_files():
+        pid = _read_pid_file(pid_file)
+        if pid:
+            pid_targets.add(pid)
+
+    for pid, _ in _collect_tesla_processes():
+        pid_targets.add(pid)
+
+    terminated_count = 0
+    for pid in sorted(pid_targets):
+        ok, _ = _terminate_pid(pid, grace_seconds=grace)
+        if ok:
+            terminated_count += 1
+
+    lock_dir = PROJECT_ROOT / "data" / "logs" / "bot.run.lock"
+    if lock_dir.exists():
+        try:
+            for child in lock_dir.iterdir():
+                if child.is_file():
+                    child.unlink(missing_ok=True)
+            lock_dir.rmdir()
+        except OSError:
+            pass
+
+    typer.secho(
+        f"Tesla stop completed. Terminated {terminated_count} process(es).",
+        fg=typer.colors.GREEN,
+    )
+    if stopped:
+        typer.echo("Stopped components: " + ", ".join(stopped))
+    if skipped:
+        typer.echo("Skipped: " + ", ".join(skipped))
 
 @app.command()
 def log():
