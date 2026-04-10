@@ -41,6 +41,7 @@ GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
 OLLAMA_ENABLED = _env_bool("OLLAMA_ENABLED", True)
 OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "{your_ollama_base_url}")
 
+# Set up roles here
 YOUR_MODEL = _resolve_model_ref(os.getenv("YOUR_MODEL_ALIAS"))
 
 # Telegram
@@ -51,6 +52,7 @@ TELEGRAM_USER_ID = int(os.getenv("TELEGRAM_USER_ID", "0"))
 BRIEFING_HOUR = int(os.getenv("BRIEFING_HOUR", "7"))
 BRIEFING_MINUTE = int(os.getenv("BRIEFING_MINUTE", "0"))
 AIRFLOW_DAILY_REPORT_CRON = os.getenv("AIRFLOW_DAILY_REPORT_CRON", "0 7 * * *")
+AIRFLOW_TIMEZONE = os.getenv("AIRFLOW_TIMEZONE", "Asia/Saigon")
 
 # Database
 TRUSTED_DB_URL = os.getenv(
@@ -74,13 +76,31 @@ KNOWLEDGE_EMBEDDING_PROVIDER = os.getenv("KNOWLEDGE_EMBEDDING_PROVIDER", "ollama
 KNOWLEDGE_EMBEDDING_MODEL = os.getenv("KNOWLEDGE_EMBEDDING_MODEL", "bge-m3").strip()
 KNOWLEDGE_EMBEDDING_DIMS = int(os.getenv("KNOWLEDGE_EMBEDDING_DIMS", "1024"))
 
+# Multi-schema database settings
+DB_VECTOR_INDEX_TYPE = os.getenv("DB_VECTOR_INDEX_TYPE", "hnsw").strip().lower()  # hnsw
+DB_SECURITY_BACKEND = os.getenv("DB_SECURITY_BACKEND", "env_var").strip().lower()  # env_var, vault, encrypted_file
+DB_SKILL_CHUNK_SIZE = int(os.getenv("DB_SKILL_CHUNK_SIZE", "800"))
+DB_SKILL_CHUNK_OVERLAP = int(os.getenv("DB_SKILL_CHUNK_OVERLAP", "100"))
+DB_RETRIEVAL_PRIORITY = [
+    s.strip().lower()
+    for s in os.getenv(
+        "DB_RETRIEVAL_PRIORITY", "knowledge,profile,system"
+    ).split(",")
+    if s.strip()
+]
+DB_UNIFIED_MEMORY_MODE = _env_bool("DB_UNIFIED_MEMORY_MODE", True)
+DB_CONVERSATION_PERSIST = _env_bool("DB_CONVERSATION_PERSIST", True)
+
 # Airflow runtime policy
 AIRFLOW_REPORT_CATCHUP = _env_bool("AIRFLOW_REPORT_CATCHUP", True)
 AIRFLOW_REPORT_RETRIES = int(os.getenv("AIRFLOW_REPORT_RETRIES", "3"))
 AIRFLOW_REPORT_RETRY_DELAY_MINUTES = int(os.getenv("AIRFLOW_REPORT_RETRY_DELAY_MINUTES", "10"))
 AIRFLOW_REPORT_DAGRUN_TIMEOUT_MINUTES = int(os.getenv("AIRFLOW_REPORT_DAGRUN_TIMEOUT_MINUTES", "60"))
 AIRFLOW_REPORT_MAX_ACTIVE_RUNS = int(os.getenv("AIRFLOW_REPORT_MAX_ACTIVE_RUNS", "1"))
-AIRFLOW_REPORT_CHAT_ID = os.getenv("AIRFLOW_REPORT_CHAT_ID", "").strip()
+AIRFLOW_REPORT_CHAT_ID = os.getenv(
+    "AIRFLOW_REPORT_CHAT_ID",
+    str(TELEGRAM_USER_ID) if TELEGRAM_USER_ID else "",
+).strip()
 AIRFLOW_REPORT_CATEGORIES = [
     item.strip().lower()
     for item in os.getenv("AIRFLOW_REPORT_CATEGORIES", "").split(",")
@@ -100,10 +120,46 @@ CAMOUFOX_STRICT_ONLY = _env_bool("CAMOUFOX_STRICT_ONLY", True)
 CHROME_CDP_ENABLED = _env_bool("CHROME_CDP_ENABLED", True)
 CHROME_CDP_PORT = int(os.getenv("CHROME_CDP_PORT", "9222"))
 
+CAMOFOX_MCP_TRANSPORT = os.getenv("CAMOFOX_MCP_TRANSPORT", "stdio").strip().lower()
+if CAMOFOX_MCP_TRANSPORT not in {"stdio", "http"}:
+    CAMOFOX_MCP_TRANSPORT = "stdio"
+
+CAMOFOX_MCP_COMMAND = os.getenv("CAMOFOX_MCP_COMMAND", "npx").strip() or "npx"
+_camofox_mcp_args_raw = os.getenv("CAMOFOX_MCP_ARGS", "-y camofox-mcp@latest")
+CAMOFOX_MCP_ARGS = shlex.split(_camofox_mcp_args_raw)
+CAMOFOX_MCP_URL = os.getenv("CAMOFOX_MCP_URL", "http://127.0.0.1:3000/mcp")
+CAMOFOX_MCP_TIMEOUT_MS = int(os.getenv("CAMOFOX_MCP_TIMEOUT_MS", "30000"))
+CAMOFOX_MCP_MAX_RETRIES = int(os.getenv("CAMOFOX_MCP_MAX_RETRIES", "2"))
+CAMOFOX_MCP_RETRY_BACKOFF_SECONDS = float(os.getenv("CAMOFOX_MCP_RETRY_BACKOFF_SECONDS", "1.0"))
+CAMOFOX_API_KEY = os.getenv("CAMOFOX_API_KEY", "")
+CAMOFOX_AUTH_REQUIRED = _env_bool("CAMOFOX_AUTH_REQUIRED", True)
+CAMOFOX_BLOCK_REMOTE = _env_bool("CAMOFOX_BLOCK_REMOTE", True)
+CAMOFOX_REQUIRE_HTTPS_REMOTE = _env_bool("CAMOFOX_REQUIRE_HTTPS_REMOTE", True)
+CAMOFOX_AUTH_PROBE_ENABLED = _env_bool("CAMOFOX_AUTH_PROBE_ENABLED", True)
+CAMOFOX_REUSE_TAB = _env_bool("CAMOFOX_REUSE_TAB", True)
+CAMOFOX_CHALLENGE_MAX_RETRIES = int(os.getenv("CAMOFOX_CHALLENGE_MAX_RETRIES", "2"))
+CAMOFOX_BEHAVIOR_MIN_DELAY_SECONDS = float(os.getenv("CAMOFOX_BEHAVIOR_MIN_DELAY_SECONDS", "2.5"))
+CAMOFOX_BEHAVIOR_MAX_DELAY_SECONDS = float(os.getenv("CAMOFOX_BEHAVIOR_MAX_DELAY_SECONDS", "7.5"))
+if CAMOFOX_BEHAVIOR_MAX_DELAY_SECONDS < CAMOFOX_BEHAVIOR_MIN_DELAY_SECONDS:
+    CAMOFOX_BEHAVIOR_MAX_DELAY_SECONDS = CAMOFOX_BEHAVIOR_MIN_DELAY_SECONDS
+
+CAMOFOX_ALLOWED_HOSTS = [
+    item.strip().lower()
+    for item in os.getenv("CAMOFOX_ALLOWED_HOSTS", "127.0.0.1,localhost,::1").split(",")
+    if item.strip()
+]
+
 # Crawl4AI
 CRAWL4AI_ENABLED = _env_bool("CRAWL4AI_ENABLED", True)
 RESEARCH_MAX_SEARCH_QUERIES = int(os.getenv("RESEARCH_MAX_SEARCH_QUERIES", "2"))
 RESEARCH_MAX_DISCOVERED_SOURCES = int(os.getenv("RESEARCH_MAX_DISCOVERED_SOURCES", "5"))
+
+# Google risk controls (these reduce self-inflicted bot flags; they don't guarantee access)
+GOOGLE_MIN_INTERVAL_SECONDS = float(os.getenv("GOOGLE_MIN_INTERVAL_SECONDS", "15"))
+GOOGLE_COOLDOWN_ON_CHALLENGE_SECONDS = float(os.getenv("GOOGLE_COOLDOWN_ON_CHALLENGE_SECONDS", "3600"))
+GOOGLE_SEARCH_CACHE_TTL_SECONDS = float(os.getenv("GOOGLE_SEARCH_CACHE_TTL_SECONDS", str(48 * 3600)))
+GOOGLE_SEARCH_LOCK_TIMEOUT_SECONDS = float(os.getenv("GOOGLE_SEARCH_LOCK_TIMEOUT_SECONDS", "120"))
+
 RESEARCH_SOURCE_ALLOWLIST = [
     item.strip().lower()
     for item in os.getenv(
@@ -131,15 +187,11 @@ WORKSPACE_PRIMING_FILES = [
 WORKSPACE_PRIMING_FILE_SETS: dict[str, list[str]] = {
     "orchestrator": [
         "AGENTS.md",
-        "BOOTSTRAP.md",
         "HEARTBEAT.md",
         "IDENTITY.md",
         "SOUL.md",
         "TOOLS.md",
         "USER.md",
-    ],
-    "classifier": [
-        "skills/Classifying/CLASSIFIER.md",
     ],
     "researcher": [
         "skills/Researching/RESEARCHER.md",

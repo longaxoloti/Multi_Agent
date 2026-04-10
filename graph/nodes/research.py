@@ -35,57 +35,40 @@ from tools.workspace_priming import get_workspace_priming_context
 from tools.ollama_manager import unload_model, load_context
 
 logger = logging.getLogger(__name__)
-
-_repo = None
-_bookmark_service = None
+_knowledge_service = None
 
 
-def _get_repo():
-    global _repo
-    if _repo is None:
-        from storage.trusted_db import AgentDBRepository
-        _repo = AgentDBRepository()
-        _repo.initialize()
-    return _repo
-
-
-def _get_bookmark_service():
-    global _bookmark_service
-    if _bookmark_service is None:
-        from storage.bookmark_service import BookmarkService
-        repo = _get_repo()
-        _bookmark_service = BookmarkService(
-            repo._session_factory,
-            is_pg=repo.engine.dialect.name == "postgresql",
-        )
-    return _bookmark_service
+def _get_knowledge_service():
+    global _knowledge_service
+    if _knowledge_service is None:
+        from storage.knowledge_service import KnowledgeService
+        _knowledge_service = KnowledgeService()
+    return _knowledge_service
 
 
 def _persist_research_sources(urls: list[str]) -> int:
-    """Persist discovered research URLs to knowledge.url_registry."""
+    """Persist discovered research URLs into unified knowledge."""
     if not urls:
         return 0
 
-    saved = 0
     try:
-        bookmark_service = _get_bookmark_service()
+        knowledge_service = _get_knowledge_service()
     except Exception as exc:
-        logger.debug("Bookmark service unavailable; skip URL persistence: %s", exc)
+        logger.debug("Knowledge service unavailable; skip URL persistence: %s", exc)
         return 0
 
-    for url in urls:
-        try:
-            domain = _normalize_domain(url)
-            trust = 0.8 if _is_allowlisted_domain(domain) else 0.55
-            bookmark_service.track_url(
-                url=url,
-                source_type="research",
-                trust_score=trust,
-            )
-            saved += 1
-        except Exception as exc:
-            logger.debug("Failed to persist research URL '%s': %s", url, exc)
-    return saved
+    try:
+        knowledge_service.save(
+            chat_id="research",
+            content="\n".join(urls),
+            category="research_sources",
+            title="Research sources",
+            metadata={"urls": urls},
+        )
+        return len(urls)
+    except Exception as exc:
+        logger.debug("Failed to persist research URLs to unified knowledge: %s", exc)
+        return 0
 
 # DEBUG LOGGING
 DEBUG_RESEARCH = os.getenv("DEBUG_RESEARCH", "").lower() in {"1", "true", "yes"}

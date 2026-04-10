@@ -2,7 +2,7 @@
 SecurityService — Manages secret references and access policies.
 
 NEVER stores plaintext credentials. Only metadata + encrypted payload references.
-Agent cannot write to manual.* or security.* without explicit user command.
+Agent cannot mutate security.* without explicit user command.
 """
 
 from __future__ import annotations
@@ -24,30 +24,25 @@ logger = logging.getLogger(__name__)
 
 # Default access policies
 _DEFAULT_POLICIES = [
-    # Agent can write to auto-updatable schemas
-    ("skills", "write", "agent", True),
-    ("skills", "update", "agent", True),
+    # Agent can write to unified auto-updatable schemas
     ("profile", "write", "agent", True),
     ("profile", "update", "agent", True),
-    ("projects", "write", "agent", True),
-    ("projects", "update", "agent", True),
     ("knowledge", "write", "agent", True),
     ("knowledge", "update", "agent", True),
+    ("knowledge", "delete", "agent", True),
     ("system", "write", "agent", True),
     ("system", "write", "system", True),
-    # Agent CANNOT write to manual or security
-    ("manual", "write", "agent", False),
-    ("manual", "update", "agent", False),
-    ("manual", "delete", "agent", False),
+    # Agent CANNOT mutate security without explicit elevation
     ("security", "write", "agent", False),
     ("security", "update", "agent", False),
     ("security", "delete", "agent", False),
-    # User can write to everything
-    ("manual", "write", "user", True),
-    ("manual", "update", "user", True),
-    ("manual", "delete", "user", True),
+    # User can write to knowledge and security
+    ("knowledge", "write", "user", True),
+    ("knowledge", "update", "user", True),
+    ("knowledge", "delete", "user", True),
     ("security", "write", "user", True),
     ("security", "update", "user", True),
+    ("security", "delete", "user", True),
     # System can write to system
     ("system", "write", "system", True),
     ("system", "update", "system", True),

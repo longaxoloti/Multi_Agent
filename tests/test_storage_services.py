@@ -45,99 +45,6 @@ def _get_session_factory():
 
 
 # ---------------------------------------------------------------------------
-# Skill Service Tests
-# ---------------------------------------------------------------------------
-
-def test_skill_ingest_from_markdown():
-    """Test ingesting a skill from a markdown file."""
-    from storage.skill_service import SkillService
-
-    sf, engine, is_pg = _get_session_factory()
-    service = SkillService(
-        sf, embedder=_fake_embedder, is_pg=is_pg
-    )
-
-    # Create a temporary markdown file
-    with tempfile.NamedTemporaryFile(mode="w", suffix=".md", delete=False) as f:
-        f.write("# Web Search Skill\n\nUse Google to search for information.\n\n## Steps\n\n1. Formulate query\n2. Execute search\n3. Parse results")
-        f.flush()
-        temp_path = f.name
-
-    try:
-        # First ingest
-        result = service.ingest_from_markdown(temp_path, tags=["research", "web"])
-        assert result["action"] == "created"
-        assert result["version_no"] == 1
-        assert result["chunks_created"] >= 1
-        source_id = result["source_id"]
-
-        # Re-ingest same content — should be no_change
-        result2 = service.ingest_from_markdown(temp_path)
-        assert result2["action"] == "no_change"
-        assert result2["source_id"] == source_id
-
-        # Modify file and re-ingest — should create new version
-        with open(temp_path, "a") as f:
-            f.write("\n\n## Advanced\n\nUse advanced search operators for better results.")
-
-        result3 = service.ingest_from_markdown(temp_path)
-        assert result3["action"] == "updated"
-        assert result3["version_no"] == 2
-        assert result3["source_id"] == source_id
-
-        # List active skills
-        active = service.get_active_skills()
-        assert len(active) >= 1
-        assert any(s["source_id"] == source_id for s in active)
-        # Only version 2 should be active
-        active_versions = [s for s in active if s["source_id"] == source_id]
-        assert all(s["version_no"] == 2 for s in active_versions)
-
-    finally:
-        os.unlink(temp_path)
-
-
-def test_skill_optimize():
-    """Test agent self-optimization creating new version."""
-    from storage.skill_service import SkillService
-
-    sf, engine, is_pg = _get_session_factory()
-    service = SkillService(sf, embedder=_fake_embedder, is_pg=is_pg)
-
-    with tempfile.NamedTemporaryFile(mode="w", suffix=".md", delete=False) as f:
-        f.write("# Code Review\n\nReview code for bugs and style issues.")
-        f.flush()
-        temp_path = f.name
-
-    try:
-        result = service.ingest_from_markdown(temp_path)
-        source_id = result["source_id"]
-
-        # Agent optimizes
-        opt_result = service.optimize_skill(
-            source_id,
-            "# Code Review v2\n\nReview code with focus on: bugs, performance, and security.",
-            summary="Optimized for security awareness",
-        )
-        assert opt_result["version_no"] == 2
-        assert opt_result["chunks_created"] >= 1
-
-        # Old version should be deprecated, new should be active
-        content = service.get_skill_content(source_id)
-        assert content is not None
-        assert content["version_no"] == 2
-        assert "security" in content["content"].lower()
-
-        # Can still access version 1
-        v1 = service.get_skill_content(source_id, version=1)
-        assert v1 is not None
-        assert v1["version_no"] == 1
-
-    finally:
-        os.unlink(temp_path)
-
-
-# ---------------------------------------------------------------------------
 # User Profile Tests
 # ---------------------------------------------------------------------------
 
@@ -236,104 +143,11 @@ def test_profile_upsert_and_supersede():
 
 
 # ---------------------------------------------------------------------------
-# Project Service Tests
-# ---------------------------------------------------------------------------
-
-def test_project_register_and_facts():
-    """Test project registration and fact management."""
-    from storage.project_service import ProjectService
-
-    sf, engine, is_pg = _get_session_factory()
-    service = ProjectService(sf)
-
-    run_id = uuid.uuid4().hex[:8]
-    repo_path = f"/tmp/test_project_{run_id}"
-
-    # Register project
-    result = service.register_project(
-        project_name=f"TestProject_{run_id}",
-        repo_path=repo_path,
-        language="Python",
-    )
-    assert result["action"] == "created"
-    project_id = result["project_id"]
-
-    # Register same path again — should return exists
-    result2 = service.register_project(
-        project_name=f"TestProject_{run_id}",
-        repo_path=repo_path,
-    )
-    assert result2["action"] == "exists"
-    assert result2["project_id"] == project_id
-
-    # Save facts
-    r1 = service.save_fact(
-        project_id=project_id,
-        fact_key="framework",
-        fact_value="LangGraph",
-    )
-    assert r1["action"] == "created"
-
-    r2 = service.save_fact(
-        project_id=project_id,
-        fact_key="database",
-        fact_value="PostgreSQL + pgvector",
-    )
-    assert r2["action"] == "created"
-
-    # Get facts
-    facts = service.get_project_facts(project_id)
-    assert len(facts) >= 2
-    keys = {f["fact_key"] for f in facts}
-    assert "framework" in keys
-    assert "database" in keys
-
-    # Save snapshot
-    snap_id = service.save_snapshot(
-        project_id=project_id,
-        summary="Initial project state with 7 PostgreSQL schemas",
-    )
-    assert snap_id
-
-    # Mark all facts stale
-    stale_count = service.mark_facts_stale(project_id)
-    assert stale_count >= 2
-
-    # Get stale facts
-    stale = service.get_stale_facts(days=0)
-    assert len(stale) >= 2
-
-
-def test_project_verification():
-    """Test project verification recording."""
-    from storage.project_service import ProjectService
-
-    sf, engine, is_pg = _get_session_factory()
-    service = ProjectService(sf)
-
-    run_id = uuid.uuid4().hex[:8]
-    result = service.register_project(
-        project_name=f"VerifyProject_{run_id}",
-        repo_path=f"/tmp/test_project_verify_{run_id}",
-        language="Python",
-    )
-    project_id = result["project_id"]
-
-    # Record verification
-    ver_id = service.record_verification(
-        project_id=project_id,
-        result="match",
-        details="All facts match current project state",
-    )
-    assert ver_id
-
-
-# ---------------------------------------------------------------------------
 # Security Service Tests
 # ---------------------------------------------------------------------------
 
 def test_security_policy_gate():
-    """Test that policy gate enforces manual/security schema rules."""
+    """Test that policy gate enforces unified knowledge/security schema rules."""
     from storage.security_service import SecurityService
 
     sf, engine, is_pg = _get_session_factory()
@@ -343,17 +157,14 @@ def test_security_policy_gate():
     created = service.initialize_default_policies()
     # created >= 0 is fine (0 if already seeded)
 
-    # Agent should be ALLOWED to write to skills
-    assert service.check_policy(schema_name="skills", action="write", actor="agent") is True
-
-    # Agent should be DENIED writing to manual
-    assert service.check_policy(schema_name="manual", action="write", actor="agent") is False
+    # Agent should be ALLOWED to write to knowledge
+    assert service.check_policy(schema_name="knowledge", action="write", actor="agent") is True
 
     # Agent should be DENIED writing to security
     assert service.check_policy(schema_name="security", action="write", actor="agent") is False
 
-    # User should be ALLOWED to write to manual
-    assert service.check_policy(schema_name="manual", action="write", actor="user") is True
+    # User should be ALLOWED to write to knowledge
+    assert service.check_policy(schema_name="knowledge", action="write", actor="user") is True
 
 
 def test_security_secret_refs():

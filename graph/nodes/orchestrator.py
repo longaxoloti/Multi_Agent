@@ -12,7 +12,8 @@ from tools.workspace_priming import build_system_prompt
 logger = logging.getLogger(__name__)
 
 _repo = None
-_skill_service = None
+_knowledge_service = None
+_unified_memory_service = None
 _profile_service = None
 
 
@@ -25,16 +26,21 @@ def _get_repo():
     return _repo
 
 
-def _get_skill_service():
-    global _skill_service
-    if _skill_service is None:
-        from storage.skill_service import SkillService
-        repo = _get_repo()
-        _skill_service = SkillService(
-            repo._session_factory,
-            is_pg=repo.engine.dialect.name == "postgresql",
-        )
-    return _skill_service
+def _get_knowledge_service():
+    global _knowledge_service
+    if _knowledge_service is None:
+        from storage.knowledge_service import KnowledgeService
+        _knowledge_service = KnowledgeService()
+    return _knowledge_service
+
+
+def _get_unified_memory_service():
+    global _unified_memory_service
+    if _unified_memory_service is None:
+        from storage.unified_memory_service import UnifiedMemoryService
+
+        _unified_memory_service = UnifiedMemoryService(repo=_get_repo())
+    return _unified_memory_service
 
 
 def _get_profile_service():
@@ -49,25 +55,33 @@ def _get_profile_service():
     return _profile_service
 
 
-def _build_skill_context(user_text: str, *, limit: int = 3) -> str:
+def _build_knowledge_context(user_id: str, user_text: str, *, limit: int = 3) -> str:
     if not user_text.strip():
         return ""
     try:
-        rows = _get_skill_service().search_skills(user_text, limit=limit)
+        rows = _get_unified_memory_service().search_by_text(
+            owner_user_id=user_id,
+            query_text=user_text,
+            limit=limit,
+        )
     except Exception as exc:
-        logger.debug("Skill context unavailable: %s", exc)
-        return ""
+        logger.debug("Unified knowledge context unavailable: %s", exc)
+        try:
+            rows = _get_knowledge_service().search(chat_id=user_id, query=user_text, limit=limit)
+        except Exception as fallback_exc:
+            logger.debug("Knowledge service fallback unavailable: %s", fallback_exc)
+            return ""
 
     if not rows:
         return ""
 
-    lines = ["Relevant skill snippets:"]
+    lines = ["Relevant unified memory:"]
     for idx, row in enumerate(rows, 1):
-        title = (row.get("title") or "Untitled skill").strip()
-        chunk = (row.get("chunk_text") or "").strip().replace("\n", " ")
-        if len(chunk) > 240:
-            chunk = chunk[:240] + "..."
-        lines.append(f"{idx}. {title}: {chunk}")
+        title = (row.get("title") or "Untitled memory").strip()
+        content = (row.get("content") or "").strip().replace("\n", " ")
+        if len(content) > 240:
+            content = content[:240] + "..."
+        lines.append(f"{idx}. {title}: {content}")
     return "\n".join(lines)
 
 
@@ -221,7 +235,7 @@ async def orchestrator_node(state: AgentState) -> dict:
 
     user_id = str(state.get("user_id") or state.get("chat_id") or "default")
     context_blocks = [
-        _build_skill_context(user_text),
+        _build_knowledge_context(user_id, user_text),
         _build_profile_context(user_id, user_text),
     ]
     context_blocks = [block for block in context_blocks if block]
