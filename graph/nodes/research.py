@@ -5,7 +5,7 @@ from urllib.parse import urlparse
 import re
 import os
 from pathlib import Path
-from tools.crawl4ai_client import crawl_url_to_markdown
+from tools.web_search.crawl4ai_client import crawl_url_to_markdown
 from langchain_core.messages import HumanMessage, SystemMessage
 from graph.state import AgentState
 from graph.llm_router import get_llm
@@ -26,13 +26,13 @@ from main.config import (
     OLLAMA_ORCHESTRATOR_MODEL,
     OLLAMA_RESEARCH_MODEL,
 )
-from tools.camofox_mcp_client import CamoFoxMCPClient
-from tools.chrome_cdp_client import ChromeCDPClient
-from tools.google_guard import GoogleGuard, GoogleGuardConfig
-from tools.research_result_cache import ResearchResultCache, CacheConfig
-from tools.file_lock import file_lock
-from tools.workspace_priming import get_workspace_priming_context
-from tools.ollama_manager import unload_model, load_context
+from tools.web_search.camofox_mcp_client import CamoFoxMCPClient
+from tools.web_search.chrome_cdp_client import ChromeCDPClient
+from tools.web_search.google_guard import GoogleGuard, GoogleGuardConfig
+from tools.web_search.research_result_cache import ResearchResultCache, CacheConfig
+from tools.web_search.file_lock import file_lock
+from tools.agent_org.workspace_priming import get_workspace_priming_context
+from tools.agent_org.ollama_manager import unload_model, load_context
 
 logger = logging.getLogger(__name__)
 _knowledge_service = None

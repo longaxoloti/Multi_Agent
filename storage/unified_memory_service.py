@@ -21,7 +21,7 @@ from sqlalchemy import text
 
 from main.config import KNOWLEDGE_EMBEDDING_DIMS, KNOWLEDGE_EMBEDDING_MODEL
 from storage.trusted_db import AgentDBRepository
-from tools.embedding_provider import embed_text_ollama
+from tools.knowledge.embedding_provider import embed_text_ollama
 
 
 def _utcnow() -> datetime:

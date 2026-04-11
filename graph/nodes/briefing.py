@@ -1,7 +1,7 @@
 import logging
 from langchain_core.messages import AIMessage
 from graph.state import AgentState
-from tools.ollama_manager import load_context
+from tools.agent_org.ollama_manager import load_context
 from main.config import OLLAMA_ORCHESTRATOR_MODEL
 
 logger = logging.getLogger(__name__)

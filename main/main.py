@@ -10,7 +10,7 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from tools.workspace_priming import get_workspace_priming_context
+from tools.agent_org.workspace_priming import get_workspace_priming_context
 from telegram_bot.bot import TelegramBot
 
 DATA_DIR = Path.home() / ".tesla"

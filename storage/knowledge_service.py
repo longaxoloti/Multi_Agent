@@ -17,7 +17,7 @@ from main.config import (
     KNOWLEDGE_PGVECTOR_REQUIRED,
 )
 from storage.trusted_db import TrustedDBRepository, UserKnowledgeRecord
-from tools.embedding_provider import embed_text_ollama
+from tools.knowledge.embedding_provider import embed_text_ollama
 
 logger = logging.getLogger(__name__)
 

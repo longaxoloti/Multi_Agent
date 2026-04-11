@@ -5,7 +5,7 @@ import sys
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from tools.camofox_mcp_client import CamoFoxMCPClient
+from tools.web_search.camofox_mcp_client import CamoFoxMCPClient
 
 
 async def run_smoke() -> int:

@@ -38,7 +38,7 @@ logging.basicConfig(
 from langchain_core.messages import HumanMessage
 from graph.state import AgentState
 from graph.nodes.research import research_node
-from tools.ollama_manager import save_context
+from tools.agent_org.ollama_manager import save_context
 
 
 async def test_research_node(query: str):

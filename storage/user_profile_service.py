@@ -26,7 +26,7 @@ from storage.models import (
     _new_uuid,
     _utcnow,
 )
-from tools.embedding_provider import embed_text_ollama
+from tools.knowledge.embedding_provider import embed_text_ollama
 from main.config import KNOWLEDGE_EMBEDDING_MODEL, KNOWLEDGE_EMBEDDING_DIMS
 
 logger = logging.getLogger(__name__)

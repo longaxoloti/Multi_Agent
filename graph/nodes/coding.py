@@ -3,8 +3,8 @@ from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 from main.config import OLLAMA_CODER_MODEL, OLLAMA_ORCHESTRATOR_MODEL
 from graph.state import AgentState
 from graph.llm_router import get_llm
-from tools.ollama_manager import load_context, unload_model
-from tools.workspace_priming import build_system_prompt
+from tools.agent_org.ollama_manager import load_context, unload_model
+from tools.agent_org.workspace_priming import build_system_prompt
 import re
 
 logger = logging.getLogger(__name__)

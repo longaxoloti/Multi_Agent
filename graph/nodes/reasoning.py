@@ -6,8 +6,8 @@ from main.config import (
     OLLAMA_ORCHESTRATOR_MODEL,
     OLLAMA_RESEARCH_MODEL,
 )
-from tools.workspace_priming import build_system_prompt
-from tools.ollama_manager import unload_model, load_context
+from tools.agent_org.workspace_priming import build_system_prompt
+from tools.agent_org.ollama_manager import unload_model, load_context
 
 logger = logging.getLogger(__name__)
 
