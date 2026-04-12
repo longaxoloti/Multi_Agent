@@ -5,7 +5,7 @@ import os
 import random
 import math
 from typing import Any, Optional
-from urllib.parse import quote_plus
+from urllib.parse import quote_plus, urldefrag, urlsplit, urlunsplit
 from playwright.async_api import async_playwright, Browser, BrowserContext, Page
 
 from main.config import CHROME_CDP_PORT
@@ -24,7 +24,33 @@ class ChromeCDPClient:
         self._lock = asyncio.Lock()
         self._pages: dict[str, Page] = {}
         self._refs: dict[str, dict[str, str]] = {}
+        self._html_cache: dict[str, str] = {}
         self._initialized = False
+
+    @staticmethod
+    def _normalize_url(url: str) -> str:
+        if not url:
+            return ""
+        normalized_url, _ = urldefrag(url)
+        parsed = urlsplit(normalized_url)
+        path = parsed.path or "/"
+        if path != "/" and path.endswith("/"):
+            path = path.rstrip("/")
+        return urlunsplit((parsed.scheme, parsed.netloc, path, parsed.query, ""))
+
+    def _store_html(self, url: str, html: str) -> None:
+        if not url or not html:
+            return
+        normalized = self._normalize_url(url)
+        if normalized:
+            self._html_cache[normalized] = html
+
+    async def _capture_html(self, page: Page) -> None:
+        try:
+            html = await page.content()
+            self._store_html(page.url, html)
+        except Exception:
+            pass
 
     async def _try_launch_chrome(self) -> bool:
         logger.info(f"Open Chrome with port {self.port}...")
@@ -118,6 +144,7 @@ class ChromeCDPClient:
             page = await self.context.new_page()
             if url and url != "about:blank":
                 await page.goto(url, wait_until="domcontentloaded")
+                await self._capture_html(page)
             tab_id = str(id(page))
             self._pages[tab_id] = page
             self._refs[tab_id] = {}
@@ -157,6 +184,7 @@ class ChromeCDPClient:
             await self._inject_virtual_cursor(page)
             # Smooth scroll down a bit after loading to simulate human reading
             await self._smooth_scroll(page)
+            await self._capture_html(page)
             return True
         except Exception as e:
             logger.error(f"CDP navigate failed: {e}")
@@ -306,6 +334,7 @@ class ChromeCDPClient:
             """
             result = await page.evaluate(extract_script)
             self._refs[tab_id] = result["urlMap"]
+            await self._capture_html(page)
             
             return {
                 "url": result["url"],
@@ -318,6 +347,40 @@ class ChromeCDPClient:
         except Exception as e:
             logger.error(f"CDP get_snapshot_page failed: {e}")
             return None
+
+    async def get_page_html(self, tab_id: str) -> Optional[str]:
+        page = self._pages.get(tab_id)
+        if not page:
+            return None
+
+        try:
+            html = await page.content()
+            self._store_html(page.url, html)
+            return html
+        except Exception as e:
+            logger.error(f"CDP get_page_html failed: {e}")
+            return None
+
+    async def get_page_html_by_url(self, url: str) -> Optional[str]:
+        normalized = self._normalize_url(url)
+        if not normalized:
+            return None
+
+        cached_html = self._html_cache.get(normalized)
+        if cached_html:
+            return cached_html
+
+        for page in self._pages.values():
+            try:
+                if self._normalize_url(page.url) != normalized:
+                    continue
+                html = await page.content()
+                self._store_html(page.url, html)
+                return html
+            except Exception:
+                continue
+
+        return None
 
     async def click(self, tab_id: str, ref: str) -> bool:
         url = self._refs.get(tab_id, {}).get(ref)

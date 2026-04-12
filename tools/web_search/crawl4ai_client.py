@@ -22,7 +22,7 @@ from main.config import CRAWL4AI_ENABLED
 
 _ARTICLE_CHAR_LIMIT = 15_000
 
-def _build_crawler_config(url: str) -> "CrawlerRunConfig":
+def _build_crawler_config(url: str, base_url: Optional[str] = None) -> "CrawlerRunConfig":
     prune_filter = PruningContentFilter(
         threshold=0.40,
         threshold_type="dynamic",
@@ -39,11 +39,17 @@ def _build_crawler_config(url: str) -> "CrawlerRunConfig":
         word_count_threshold=5,
         page_timeout=20_000,
         wait_until="domcontentloaded",
+        base_url=base_url,
         verbose=False,
     )
 
 
-async def crawl_url_to_markdown(url: str) -> str:
+async def crawl_url_to_markdown(
+    url: str,
+    html: Optional[str] = None,
+    base_url: Optional[str] = None,
+    cdp_url: Optional[str] = None,
+) -> str:
     if not CRAWL4AI_ENABLED:
         logger.debug("CRAWL4AI_ENABLED=false; skipping article crawl for %s", url)
         return ""
@@ -52,16 +58,43 @@ async def crawl_url_to_markdown(url: str) -> str:
         logger.warning("crawl4ai not installed; skipping %s", url)
         return ""
 
-    browser_config = BrowserConfig(
-        browser_type="chromium",
-        headless=True,
-        verbose=False,
-    )
-    run_config = _build_crawler_config(url)
+    browser_config_kwargs = {
+        "browser_type": "chromium",
+        "headless": True,
+        "verbose": False,
+    }
+    if cdp_url:
+        browser_config_kwargs.update(
+            {
+                "browser_mode": "custom",
+                "cdp_url": cdp_url,
+                "cache_cdp_connection": True,
+            }
+        )
+
+    browser_config = BrowserConfig(**browser_config_kwargs)
+    run_config = _build_crawler_config(url, base_url=base_url or (url if html else base_url))
+
+    async def _run_once(crawl_target: str):
+        async with AsyncWebCrawler(config=browser_config) as crawler:
+            return await crawler.arun(url=crawl_target, config=run_config)
+
+    crawl_target = f"raw://{html}" if html else url
+    used_cached_html = bool(html)
 
     try:
-        async with AsyncWebCrawler(config=browser_config) as crawler:
-            result = await crawler.arun(url=url, config=run_config)
+        result = await _run_once(crawl_target)
+
+        # Some sites enforce Trusted Types/CSP and reject document.write during raw:// ingestion.
+        # If cached HTML mode fails, retry with direct URL crawling.
+        if used_cached_html and (not result.success):
+            err_msg = (result.error_message or "").lower()
+            if "trustedhtml" in err_msg or "document requires" in err_msg or "set_content" in err_msg:
+                logger.info(
+                    "Crawl4AI retrying direct URL after cached HTML failure for %s",
+                    url,
+                )
+                result = await _run_once(url)
 
         if not result.success:
             logger.warning(

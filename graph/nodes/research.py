@@ -1,6 +1,7 @@
 import logging
 import asyncio
 import random
+from datetime import datetime
 from urllib.parse import urlparse
 import re
 import os
@@ -70,6 +71,83 @@ def _persist_research_sources(urls: list[str]) -> int:
         logger.debug("Failed to persist research URLs to unified knowledge: %s", exc)
         return 0
 
+
+def _extract_crawled_articles(context: str) -> list[dict]:
+    if not context:
+        return []
+
+    pattern = re.compile(
+        r"=== CRAWL4AI ARTICLE ===\n"
+        r"URL: (?P<url>.+?)\n"
+        r"DOMAIN: (?P<domain>.*?)\n"
+        r"TITLE_HINT: (?P<title>.*?)\n"
+        r"CONTENT:\n(?P<content>.*?)(?=\n=== |\Z)",
+        re.DOTALL,
+    )
+    items: list[dict] = []
+    for match in pattern.finditer(context):
+        url = (match.group("url") or "").strip()
+        content = (match.group("content") or "").strip()
+        if not url or not content:
+            continue
+        items.append(
+            {
+                "source_url": url,
+                "domain": (match.group("domain") or "").strip(),
+                "title_hint": (match.group("title") or "").strip(),
+                "content": content,
+            }
+        )
+    return items
+
+
+def _persist_crawled_articles(
+    *,
+    chat_id: str,
+    topic: str,
+    query: str,
+    articles: list[dict],
+) -> dict:
+    if not articles:
+        return {"saved": 0, "deduplicated": 0, "failed": 0}
+
+    try:
+        knowledge_service = _get_knowledge_service()
+    except Exception as exc:
+        logger.debug("Knowledge service unavailable; skip article persistence: %s", exc)
+        return {"saved": 0, "deduplicated": 0, "failed": len(articles)}
+
+    counters = {"saved": 0, "deduplicated": 0, "failed": 0}
+    for item in articles:
+        source_url = item.get("source_url", "")
+        title = item.get("title_hint", "") or source_url
+        content = item.get("content", "")
+        metadata = {
+            "source_url": source_url,
+            "domain": item.get("domain", ""),
+            "topic": topic,
+            "query": query,
+            "ingested_at": datetime.utcnow().isoformat(),
+            "ingestion_pipeline": "research_node_crawl4ai",
+        }
+        try:
+            result = knowledge_service.save_deduplicated(
+                chat_id=chat_id,
+                content=content,
+                category="web_news",
+                title=title[:200],
+                metadata=metadata,
+                source_url=source_url,
+            )
+            if result.get("deduplicated"):
+                counters["deduplicated"] += 1
+            else:
+                counters["saved"] += 1
+        except Exception as exc:
+            logger.debug("Failed to persist crawled article %s: %s", source_url, exc)
+            counters["failed"] += 1
+    return counters
+
 # DEBUG LOGGING
 DEBUG_RESEARCH = os.getenv("DEBUG_RESEARCH", "").lower() in {"1", "true", "yes"}
 DEBUG_LOG_FILE = Path("data/logs/research_debug.log") if DEBUG_RESEARCH else None
@@ -114,6 +192,7 @@ async def research_node(state: AgentState) -> dict:
         user_text = user_message.content if user_message else ""
 
     research_query = (search_query or "").strip() or (topic or "").strip() or user_text.strip()
+    persist_enabled = bool(state.get("persist_research_to_db", True))
     logger.info("Research query (topic-first): %r", research_query)
     _debug_log("START", "user_text", user_text)
     _debug_log("START", "topic", topic)
@@ -124,6 +203,7 @@ async def research_node(state: AgentState) -> dict:
             "Research unavailable: CAMOUFOX_ENABLED=false. "
             "This research flow only supports Camoufox browser crawling."
         )
+        discovered_sources = []
     else:
         logger.info("Research crawl mode is active.")
         camoufox_user_id = str(state.get("chat_id") or session_id or "agent")
@@ -181,6 +261,27 @@ async def research_node(state: AgentState) -> dict:
         finally:
             await browser.close()
 
+    chat_id_for_persistence = str(state.get("chat_id") or session_id or "research")
+    crawled_articles = _extract_crawled_articles(collected_context)
+    if persist_enabled:
+        article_persistence = _persist_crawled_articles(
+            chat_id=chat_id_for_persistence,
+            topic=topic or research_query,
+            query=research_query,
+            articles=crawled_articles,
+        )
+    else:
+        article_persistence = {"saved": 0, "deduplicated": 0, "failed": 0}
+
+    if crawled_articles and persist_enabled:
+        logger.info(
+            "Research article persistence | extracted=%s saved=%s deduplicated=%s failed=%s",
+            len(crawled_articles),
+            article_persistence.get("saved", 0),
+            article_persistence.get("deduplicated", 0),
+            article_persistence.get("failed", 0),
+        )
+
     # =========================== Synthesize ===================================
     task_description = "\n".join(f"{i + 1}. {t}" for i, t in enumerate(tasks))
     synthesis_user_prompt = (
@@ -236,6 +337,13 @@ async def research_node(state: AgentState) -> dict:
         "model": OLLAMA_RESEARCH_MODEL,
         "result": result_text,
         "sources": sources,
+        "persistence": {
+            "articles_extracted": len(crawled_articles),
+            "articles_saved": article_persistence.get("saved", 0),
+            "articles_deduplicated": article_persistence.get("deduplicated", 0),
+            "articles_failed": article_persistence.get("failed", 0),
+            "source_urls_saved": persisted_sources,
+        },
     }
 
     return {
@@ -257,6 +365,13 @@ def _is_probable_article_url(url: str) -> bool:
         "news.google.com/search",
         "youtube.com",
         "accounts.google.com",
+        "/follow?",
+        "?iid=",
+        "/live-updates",
+        "/tag/",
+        "/topics/",
+        "/video/",
+        "/watch",
         "/privacy",
         "/terms",
         "/settings",
@@ -749,7 +864,21 @@ async def perform_camoufox_direct_crawl(
         _debug_log("CRAWL4AI_FETCH", "source_url", source_url)
         _debug_log("CRAWL4AI_FETCH", "source_domain", source_domain)
         _debug_log("CRAWL4AI_FETCH", "source_title", source_title)
-        article_markdown = await crawl_url_to_markdown(source_url)
+        cached_html = None
+        if hasattr(browser, "get_page_html_by_url"):
+            try:
+                cached_html = await browser.get_page_html_by_url(source_url)
+                if cached_html:
+                    logger.info("Research evidence | using cached browser HTML for %s", source_url)
+            except Exception as error:
+                logger.debug("Cached HTML lookup failed for %s: %s", source_url, error)
+
+        article_markdown = await crawl_url_to_markdown(
+            source_url,
+            html=cached_html,
+            base_url=source_url if cached_html else None,
+            cdp_url=getattr(browser, "cdp_url", None),
+        )
         if not article_markdown:
             logger.info("Research evidence | crawl_empty url=%s", source_url)
             _debug_log("CRAWL4AI_RESULT", "crawl_failed_empty", source_url)

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections import defaultdict
 from datetime import datetime
+from urllib.parse import urlparse
 
 from storage.trusted_db import TrustedClaim, UserKnowledgeRecord
 
@@ -68,4 +69,52 @@ def build_daily_knowledge_report_text(
             )
         lines.append("")
 
+    return "\n".join(lines)
+
+
+def build_web_news_memory_report_text(
+    records: list[UserKnowledgeRecord],
+    generated_at: datetime | None = None,
+    window_start: datetime | None = None,
+    window_end: datetime | None = None,
+) -> str:
+    generated_at = generated_at or datetime.utcnow()
+    if not records:
+        return "No persisted web news found in this interval."
+
+    lines: list[str] = [
+        "Daily Web News Memory Report",
+        f"Generated at: {generated_at.strftime('%Y-%m-%d %H:%M UTC')}",
+    ]
+
+    if window_start and window_end:
+        lines.append(
+            "Interval: "
+            f"{window_start.strftime('%Y-%m-%d %H:%M UTC')} -> {window_end.strftime('%Y-%m-%d %H:%M UTC')}"
+        )
+    lines.append("")
+
+    ordered = sorted(records, key=lambda x: x.created_at, reverse=True)
+    domain_groups: dict[str, list[UserKnowledgeRecord]] = defaultdict(list)
+    for item in ordered:
+        metadata = item.metadata or {}
+        source_url = str(metadata.get("source_url") or "").strip()
+        domain = urlparse(source_url).netloc.lower() if source_url else "unknown"
+        domain_groups[domain].append(item)
+
+    for domain, items in domain_groups.items():
+        lines.append(f"## {domain}")
+        for idx, item in enumerate(items[:8], 1):
+            metadata = item.metadata or {}
+            source_url = str(metadata.get("source_url") or "")
+            snippet = (item.content or "").strip().replace("\n", " ")
+            if len(snippet) > 180:
+                snippet = snippet[:180] + "..."
+            title = (item.title or "").strip() or snippet
+            lines.append(f"{idx}. {title}")
+            lines.append(f"   - source: {source_url or 'n/a'}")
+            lines.append(f"   - stored_at: {item.created_at.strftime('%Y-%m-%d %H:%M UTC')}")
+        lines.append("")
+
+    lines.append(f"Total persisted web_news items: {len(records)}")
     return "\n".join(lines)
