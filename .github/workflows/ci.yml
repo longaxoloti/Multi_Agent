@@ -13,7 +13,7 @@ jobs:
     # Optional Postgres service for integration tests
     services:
       postgres:
-        image: pgvector/pgvector:16
+        image: pgvector/pgvector:pg16-bookworm
         env:
           POSTGRES_DB: agent_ai
           POSTGRES_USER: agent
