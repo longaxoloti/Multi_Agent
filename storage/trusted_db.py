@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import difflib
+import hashlib
 import json
 import logging
 import re
@@ -454,50 +455,61 @@ class AgentDBRepository:
                 chat_id=str(chat_id),
             )
 
+            memory_columns = self._get_column_names("memories", schema="knowledge")
+            insert_columns = [
+                "id",
+                "entity_id",
+                "owner_user_id",
+                "memory_type",
+                "ingestion_mode",
+                "summary",
+                "content",
+                "confidence",
+                "decay_weight",
+                "status",
+                "valid_from",
+                "content_hash",
+                "canonical_hash",
+                "created_at",
+                "updated_at",
+                "metadata_json",
+            ]
+            insert_values = [
+                ":id",
+                ":entity_id",
+                ":owner_user_id",
+                ":memory_type",
+                "'user_pinned'",
+                ":summary",
+                ":content",
+                "0.95",
+                "1.0",
+                "'active'",
+                ":valid_from",
+                "md5(:content)",
+                "md5(regexp_replace(lower(:content), '\\s+', ' ', 'g'))",
+                ":created_at",
+                ":updated_at",
+                ":metadata_json",
+            ]
+
+            if "source_schema" in memory_columns:
+                insert_columns.append("source_schema")
+                insert_values.append("'knowledge.memories'")
+            if "source_record_id" in memory_columns:
+                insert_columns.append("source_record_id")
+                insert_values.append(":source_record_id")
+
+            insert_sql = (
+                "INSERT INTO knowledge.memories (\n"
+                f"    {', '.join(insert_columns)}\n"
+                ") VALUES (\n"
+                f"    {', '.join(insert_values)}\n"
+                ")"
+            )
+
             conn.execute(
-                text(
-                    """
-                    INSERT INTO knowledge.memories (
-                        id,
-                        entity_id,
-                        owner_user_id,
-                        memory_type,
-                        ingestion_mode,
-                        summary,
-                        content,
-                        confidence,
-                        decay_weight,
-                        status,
-                        valid_from,
-                        content_hash,
-                        canonical_hash,
-                        source_schema,
-                        source_record_id,
-                        created_at,
-                        updated_at,
-                        metadata_json
-                    ) VALUES (
-                        :id,
-                        :entity_id,
-                        :owner_user_id,
-                        :memory_type,
-                        'user_pinned',
-                        :summary,
-                        :content,
-                        0.95,
-                        1.0,
-                        'active',
-                        :valid_from,
-                        md5(:content),
-                        md5(regexp_replace(lower(:content), '\\s+', ' ', 'g')),
-                        'knowledge.memories',
-                        :source_record_id,
-                        :created_at,
-                        :updated_at,
-                        :metadata_json
-                    )
-                    """
-                ),
+                text(insert_sql),
                 {
                     "id": final_id,
                     "entity_id": entity_id,
@@ -570,6 +582,61 @@ class AgentDBRepository:
                 },
             )
         return final_id
+
+    @staticmethod
+    def _canonical_content_hash(content: str) -> str:
+        normalized = re.sub(r"\s+", " ", (content or "").strip().lower())
+        return hashlib.md5(normalized.encode("utf-8")).hexdigest()
+
+    def find_knowledge_duplicate(
+        self,
+        *,
+        chat_id: str,
+        category: str,
+        source_url: str = "",
+        content: str = "",
+    ) -> Optional[str]:
+        if self.engine.dialect.name != "postgresql":
+            raise RuntimeError("Knowledge dedupe requires PostgreSQL + pgvector")
+
+        if not self._unified_memory_mode:
+            raise RuntimeError("Legacy manual storage mode has been removed")
+
+        canonical_hash = self._canonical_content_hash(content)
+        source_url = (source_url or "").strip()
+
+        sql = """
+            SELECT m.id
+            FROM knowledge.memories m
+            WHERE m.owner_user_id = :chat_id
+              AND m.memory_type = :category
+              AND m.status = 'active'
+              AND (
+                m.canonical_hash = :canonical_hash
+                OR (
+                    :source_url <> ''
+                    AND (
+                        m.metadata_json::jsonb -> 'metadata' ->> 'source_url' = :source_url
+                    )
+                )
+              )
+            ORDER BY m.created_at DESC
+            LIMIT 1
+        """
+
+        with self.engine.begin() as conn:
+            self._set_current_user_id(conn, str(chat_id))
+            row = conn.execute(
+                text(sql),
+                {
+                    "chat_id": str(chat_id),
+                    "category": (category or "note").strip().lower(),
+                    "canonical_hash": canonical_hash,
+                    "source_url": source_url,
+                },
+            ).first()
+
+        return str(row[0]) if row else None
 
     def get_knowledge_record(self, record_id: str, chat_id: Optional[str] = None) -> Optional[UserKnowledgeRecord]:
         if self.engine.dialect.name != "postgresql":

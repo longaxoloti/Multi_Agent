@@ -1,6 +1,6 @@
 services:
   postgres:
-    image: pgvector/pgvector:16
+    image: pgvector/pgvector:pg16-bookworm
     container_name: multi-agent-postgres
     restart: unless-stopped
     environment:

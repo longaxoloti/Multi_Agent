@@ -114,6 +114,53 @@ class KnowledgeService:
             "category": final_category,
         }
 
+    def save_deduplicated(
+        self,
+        *,
+        chat_id: str,
+        content: str,
+        category: str = "note",
+        title: str = "",
+        metadata: Optional[dict] = None,
+        source_url: str = "",
+    ) -> dict:
+        final_content = (content or "").strip()[:KNOWLEDGE_MAX_CONTENT_CHARS]
+        if not final_content:
+            raise ValueError("content is empty")
+
+        final_category = (category or "note").strip().lower()
+        final_metadata = dict(metadata or {})
+        if source_url:
+            final_metadata.setdefault("source_url", source_url)
+
+        if not self.can_use_db:
+            raise RuntimeError("Knowledge database is not available")
+
+        duplicate_id = self._repo.find_knowledge_duplicate(
+            chat_id=str(chat_id),
+            category=final_category,
+            source_url=(source_url or "").strip(),
+            content=final_content,
+        )
+        if duplicate_id:
+            return {
+                "record_id": duplicate_id,
+                "stored_in_db": False,
+                "stored_in_vector": False,
+                "category": final_category,
+                "deduplicated": True,
+            }
+
+        save_result = self.save(
+            chat_id=str(chat_id),
+            content=final_content,
+            category=final_category,
+            title=title,
+            metadata=final_metadata,
+        )
+        save_result["deduplicated"] = False
+        return save_result
+
     def get(self, *, chat_id: str, record_id: str) -> Optional[dict]:
         if not self.can_use_db:
             raise RuntimeError("Knowledge database is not available")

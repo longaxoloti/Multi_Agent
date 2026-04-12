@@ -240,6 +240,51 @@ def test_backward_compat_knowledge_service():
     assert "Backward" in fetched["content"]
 
 
+def test_web_news_deduplication_across_repeated_ingestion_runs():
+    """Repeated scheduler-like saves of the same article should not create duplicates."""
+    from storage.knowledge_service import KnowledgeService
+
+    repo = AgentDBRepository()
+    repo.initialize()
+    service = KnowledgeService(
+        trusted_repo=repo,
+        db_enabled=True,
+        db_required=True,
+        embedder=_fake_embedder,
+    )
+
+    chat_id = f"dedupe_test_{uuid.uuid4().hex[:8]}"
+    source_url = "https://example.com/world/major-event"
+    article_content = "Global markets rallied after a major policy update and multiple outlets confirmed the trend."
+
+    first = service.save_deduplicated(
+        chat_id=chat_id,
+        content=article_content,
+        category="web_news",
+        title="Major world event",
+        metadata={"source_url": source_url, "domain": "example.com"},
+        source_url=source_url,
+    )
+    assert first["stored_in_db"] is True
+    assert first.get("deduplicated") is False
+
+    second = service.save_deduplicated(
+        chat_id=chat_id,
+        content=article_content,
+        category="web_news",
+        title="Major world event",
+        metadata={"source_url": source_url, "domain": "example.com"},
+        source_url=source_url,
+    )
+    assert second["stored_in_db"] is False
+    assert second.get("deduplicated") is True
+    assert second["record_id"] == first["record_id"]
+
+    records = service.list_recent(chat_id=chat_id, limit=10, category="web_news")
+    assert len(records) == 1
+    assert str(records[0]["id"]) == str(first["record_id"])
+
+
 def test_knowledge_service_rejects_sqlite_strict_mode():
     """Strict mode must reject SQLite knowledge persistence/search paths."""
     from storage.knowledge_service import KnowledgeService

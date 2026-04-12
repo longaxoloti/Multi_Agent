@@ -51,7 +51,7 @@ TELEGRAM_USER_ID = int(os.getenv("TELEGRAM_USER_ID", "0"))
 # Scheduler
 BRIEFING_HOUR = int(os.getenv("BRIEFING_HOUR", "7"))
 BRIEFING_MINUTE = int(os.getenv("BRIEFING_MINUTE", "0"))
-AIRFLOW_DAILY_REPORT_CRON = os.getenv("AIRFLOW_DAILY_REPORT_CRON", "0 7 * * *")
+AIRFLOW_DAILY_REPORT_CRON = os.getenv("AIRFLOW_DAILY_REPORT_CRON", "0 7,19 * * *")
 AIRFLOW_TIMEZONE = os.getenv("AIRFLOW_TIMEZONE", "Asia/Saigon")
 
 # Database
@@ -187,10 +187,8 @@ WORKSPACE_PRIMING_FILES = [
 WORKSPACE_PRIMING_FILE_SETS: dict[str, list[str]] = {
     "orchestrator": [
         "AGENTS.md",
-        "HEARTBEAT.md",
         "IDENTITY.md",
         "SOUL.md",
-        "TOOLS.md",
         "USER.md",
     ],
     "researcher": [
@@ -203,17 +201,3 @@ WORKSPACE_PRIMING_FILE_SETS: dict[str, list[str]] = {
 
 # Temp context dir (for model handoff serialisation)
 TEMP_CONTEXT_DIR = SESSIONS_DIR
-
-DAILY_BRIEFING_SYSTEM_PROMPT = """You are a Daily Briefing Agent that compiles daily news summaries.
-Your job:
-1. Search for the most important news of the day across key categories
-2. For each story, provide a brief summary and source link
-3. Format the briefing in a clean, readable structure
-
-Categories to cover:
-- 🌍 World News (top 2-3 stories)
-- 💼 Business & Economy
-- 🤖 Technology & AI
-- 📈 Markets (stocks, crypto highlights)
-
-Keep each summary to 2-3 sentences. Be factual and objective."""

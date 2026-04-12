@@ -18,29 +18,100 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
 from main import __version__
 
+
+def _has_command(name: str) -> bool:
+    result = subprocess.run(["which", name], capture_output=True, text=True, check=False)
+    return result.returncode == 0 and bool(result.stdout.strip())
+
+
+def _resolve_compose_command() -> list[str] | None:
+    """Return a usable compose command: docker compose (preferred) or docker-compose."""
+    if _has_command("docker"):
+        probe = subprocess.run(
+            ["docker", "compose", "version"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if probe.returncode == 0:
+            return ["docker", "compose"]
+
+    if _has_command("docker-compose"):
+        probe = subprocess.run(
+            ["docker-compose", "version"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if probe.returncode == 0:
+            return ["docker-compose"]
+
+    return None
+
+
+def _ensure_local_data_dirs() -> None:
+    DB_DIR.mkdir(parents=True, exist_ok=True)
+    LOG_DIR.mkdir(parents=True, exist_ok=True)
+
+
+def _sync_db_compose_file() -> Path | None:
+    source_dc = PROJECT_ROOT / "infra" / "db" / "docker-compose.yml"
+    if not source_dc.exists():
+        return None
+    target_dc = DB_DIR / "docker-compose.yml"
+    target_dc.write_text(source_dc.read_text())
+    return target_dc
+
+
+def _bootstrap_runtime(*, migrate: bool) -> None:
+    _ensure_local_data_dirs()
+
+    compose_cmd = _resolve_compose_command()
+    if compose_cmd is None:
+        raise RuntimeError(
+            "No usable Docker Compose command found. Install Docker Desktop and ensure either 'docker compose' or 'docker-compose' works in PATH."
+        )
+
+    target_dc = _sync_db_compose_file()
+    if target_dc is None:
+        raise RuntimeError(f"Database compose file not found at {PROJECT_ROOT / 'infra' / 'db' / 'docker-compose.yml'}")
+
+    typer.echo("Ensuring database containers are running...")
+    try:
+        subprocess.run([*compose_cmd, "up", "-d"], cwd=str(DB_DIR), check=True)
+    except subprocess.CalledProcessError as exc:
+        raise RuntimeError(
+            "Failed to start database containers. Ensure Docker daemon is running, then retry tesla start/init."
+        ) from exc
+
+    if migrate:
+        typer.echo("Applying database schemas via Alembic...")
+        alembic_ini = PROJECT_ROOT / "infra" / "db" / "alembic.ini"
+        if not alembic_ini.exists():
+            raise RuntimeError(f"Alembic config not found at {alembic_ini}")
+
+        subprocess.run(
+            ["alembic", "-c", str(alembic_ini), "upgrade", "head"],
+            cwd=str(PROJECT_ROOT / "infra" / "db"),
+            check=True,
+        )
+
 @app.command()
 def init():
     """Initialize the local application data and database."""
     typer.echo(f"Initializing Tesla at {APP_DIR}...")
-    DB_DIR.mkdir(parents=True, exist_ok=True)
-    LOG_DIR.mkdir(parents=True, exist_ok=True)
+    _ensure_local_data_dirs()
 
-    # Note: Copying the docker_compose structure into ~/.tesla/db
-    source_dc = PROJECT_ROOT / "infra" / "db" / "docker-compose.yml"
-    target_dc = DB_DIR / "docker-compose.yml"
-    
-    if source_dc.exists():
-        target_dc.write_text(source_dc.read_text())
-        typer.echo("Starting database containers...")
-        subprocess.run(["docker", "compose", "up", "-d"], cwd=str(DB_DIR), check=True)
-    else:
-        typer.echo(f"Warning: {source_dc} not found.", err=True)
-
-    # Initialize alembic seamlessly natively from the project.
     typer.echo("Applying database schemas via Alembic...")
     alembic_ini = PROJECT_ROOT / "infra" / "db" / "alembic.ini"
-    if alembic_ini.exists():
-        subprocess.run(["alembic", "-c", str(alembic_ini), "upgrade", "head"], cwd=str(PROJECT_ROOT / "infra" / "db"), check=True)
+    if not alembic_ini.exists():
+        raise RuntimeError(f"Alembic config not found at {alembic_ini}")
+
+    subprocess.run(
+        ["alembic", "-c", str(alembic_ini), "upgrade", "head"],
+        cwd=str(PROJECT_ROOT / "infra" / "db"),
+        check=True,
+    )
     
     typer.secho("Tesla Agent initialized successfully!", fg=typer.colors.GREEN)
 
@@ -48,6 +119,7 @@ def init():
 def start():
     """Start the foreground agent process."""
     typer.echo("Starting Tesla Agent...")
+    _bootstrap_runtime(migrate=False)
     # Delay import to avoid loading everything on fast CLI commands
     from main.main import main
     main()
@@ -192,12 +264,22 @@ def stop(grace: int = typer.Option(3, "--grace", min=0, help="Grace period in se
     else:
         skipped.append("project stack script (not found)")
 
-    db_compose = DB_DIR / "docker-compose.yml"
-    if db_compose.exists():
-        subprocess.run(["docker", "compose", "down", "--remove-orphans"], cwd=str(DB_DIR), check=False)
-        stopped.append("database containers")
+    db_compose_dirs = [DB_DIR, PROJECT_ROOT / "infra" / "db"]
+    compose_cmd = _resolve_compose_command()
+    if compose_cmd is None:
+        skipped.append("database containers (docker compose command not found)")
     else:
-        skipped.append("database containers (compose not found)")
+        db_stopped = False
+        for compose_dir in db_compose_dirs:
+            db_compose = compose_dir / "docker-compose.yml"
+            if not db_compose.exists():
+                continue
+            subprocess.run([*compose_cmd, "down", "--remove-orphans"], cwd=str(compose_dir), check=False)
+            db_stopped = True
+        if db_stopped:
+            stopped.append("database containers")
+        else:
+            skipped.append("database containers (compose not found)")
 
     pid_targets: set[int] = set()
     for pid_file in _iter_tesla_pid_files():
