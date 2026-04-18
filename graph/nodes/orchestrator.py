@@ -227,6 +227,8 @@ async def orchestrator_node(state: AgentState) -> dict:
     intent = state.get("intent") or ctx.get("intent") or "CHAT"
     topic = state.get("topic") or ctx.get("topic") or ""
     search_query = state.get("search_query") or ctx.get("search_query") or "NONE"
+    report_mode = state.get("report_mode") or ctx.get("report_mode") or ""
+    fixed_source_urls = state.get("fixed_source_urls") or ctx.get("fixed_source_urls") or []
 
     full_system = build_system_prompt(
         "Follow the workspace instruction pack and execute orchestration exactly.",
@@ -234,13 +236,19 @@ async def orchestrator_node(state: AgentState) -> dict:
     )
 
     user_id = str(state.get("user_id") or state.get("chat_id") or "default")
-    context_blocks = [
-        _build_knowledge_context(user_id, user_text),
-        _build_profile_context(user_id, user_text),
-    ]
-    context_blocks = [block for block in context_blocks if block]
-    if context_blocks:
-        full_system += "\n\n" + "\n\n".join(context_blocks)
+    report_mode_normalized = str(report_mode or "").strip().lower()
+    is_daily_report = (
+        report_mode_normalized in {"daily_fixed_sources", "daily_report"}
+        or str(session_id).startswith("tg_daily")
+    )
+    if not is_daily_report:
+        context_blocks = [
+            _build_knowledge_context(user_id, user_text),
+            _build_profile_context(user_id, user_text),
+        ]
+        context_blocks = [block for block in context_blocks if block]
+        if context_blocks:
+            full_system += "\n\n" + "\n\n".join(context_blocks)
 
     llm = get_llm(task_type="orchestrator", temperature=0.2)
 
@@ -374,6 +382,8 @@ async def orchestrator_node(state: AgentState) -> dict:
                 "intent": intent,
                 "topic": topic,
                 "search_query": search_query_for_workers,
+                "report_mode": report_mode,
+                "fixed_source_urls": fixed_source_urls,
                 "user_message": user_text,
                 "tasks": tasks_for_worker,
                 "routing_decision": worker_type,
@@ -474,6 +484,8 @@ async def orchestrator_node(state: AgentState) -> dict:
             "intent": intent,
             "topic": topic,
             "search_query": search_query_for_workers,
+            "report_mode": report_mode,
+            "fixed_source_urls": fixed_source_urls,
             "user_message": user_text,
             "tasks": tasks_for_worker,
             "routing_decision": routing_decision,

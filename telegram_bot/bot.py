@@ -125,9 +125,9 @@ class TelegramBot:
             f"Topic focus: {topic_query}\n"
             f"Time window: {start_utc.strftime('%Y-%m-%d %H:%M UTC')} -> {now_utc.strftime('%Y-%m-%d %H:%M UTC')}\n"
             "Requirements:\n"
-            "1) Focus on high-impact updates and major developments.\n"
-            "2) Include clear source citations (URL).\n"
-            "3) Highlight key implications briefly.\n"
+            "1) Focus on updates published or materially updated within the selected window.\n"
+            "2) Prefer events from today and do not reuse stale items unless they are directly updated today.\n"
+            "3) Include clear source citations (URL).\n"
             "4) Keep the output concise and factual.\n"
             "5) Return a flexible number of news items based on reliable information available in the selected window.\n"
             "6) Do not force placeholders or invented items when evidence is limited.\n"
@@ -138,11 +138,35 @@ class TelegramBot:
         )
 
     @staticmethod
-    def _report_topics() -> list[tuple[str, str]]:
+    def _report_topics() -> list[tuple[str, str, list[str]]]:
         return [
-            ("Tin tức nổi bật", "Latest and most notable updates across major areas"),
-            ("Tài chính - Kinh tế", "Financial markets, macroeconomics, and economic volatility"),
-            ("Công nghệ thông tin", "Information technology, software, AI, and cybersecurity"),
+            (
+                "Tin tức nổi bật trong ngày",
+                "today's top news and major developments across reliable sources",
+                [
+                    "https://apnews.com/hub/world-news",
+                    "https://vnexpress.net/",
+                ],
+            ),
+            (
+                "Tài chính - Kinh tế",
+                "today's financial markets, macroeconomics, and economic volatility",
+                [
+                    "https://apnews.com/hub/business",
+                    "https://apnews.com/hub/financial-markets",
+                    "https://cafef.vn/",
+                ],
+            ),
+            (
+                "Công nghệ thông tin",
+                "today's information technology, software, AI, and cybersecurity developments",
+                [
+                    "https://apnews.com/hub/technology",
+                    "https://apnews.com/hub/information-technology",
+                    "https://apnews.com/hub/artificial-intelligence",
+                    "https://techcrunch.com/category/artificial-intelligence/",
+                ],
+            ),
         ]
 
     async def _send_long_message(self, bot, chat_id: str, text: str) -> None:
@@ -183,10 +207,12 @@ class TelegramBot:
         topic_index: int,
         topic_label: str,
         topic_query: str,
+        fixed_source_urls: list[str],
         now_utc: datetime,
     ) -> str:
         prompt = self._build_topic_prompt(now_utc, topic_label=topic_label, topic_query=topic_query)
         session_id = f"{session_prefix}_{topic_index}_{now_utc.strftime('%Y%m%d%H%M%S')}"
+        search_query = f"{topic_query} today latest news"
         logger.info(
             "Running daily report topic=%s chat_id=%s session_id=%s",
             topic_label,
@@ -199,6 +225,10 @@ class TelegramBot:
                 "messages": [HumanMessage(content=prompt)],
                 "chat_id": chat_id,
                 "session_id": session_id,
+                "report_mode": "daily_fixed_sources",
+                "fixed_source_urls": fixed_source_urls,
+                "search_query": search_query,
+                "topic": topic_label,
                 "intent": "",
                 "memory_context": "",
                 "verification_summary": "",
@@ -240,7 +270,7 @@ class TelegramBot:
     async def _run_sequential_topic_reports(self, *, chat_id: str, session_prefix: str, bot) -> None:
         now_utc = datetime.utcnow()
 
-        for idx, (topic_label, topic_query) in enumerate(self._report_topics(), 1):
+        for idx, (topic_label, topic_query, fixed_source_urls) in enumerate(self._report_topics(), 1):
             try:
                 topic_text = await self._run_single_topic_daily_report(
                     chat_id=chat_id,
@@ -248,6 +278,7 @@ class TelegramBot:
                     topic_index=idx,
                     topic_label=topic_label,
                     topic_query=topic_query,
+                    fixed_source_urls=fixed_source_urls,
                     now_utc=now_utc,
                 )
             except Exception as exc:

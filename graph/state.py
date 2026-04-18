@@ -11,6 +11,8 @@ class AgentState(TypedDict):
     messages: Annotated[list[BaseMessage], operator.add]
     chat_id: str
     session_id: str
+    report_mode: str
+    fixed_source_urls: list[str]
     intent: str
     topic: str
     search_query: str

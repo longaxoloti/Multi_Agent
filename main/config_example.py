@@ -169,6 +169,12 @@ RESEARCH_SOURCE_ALLOWLIST = [
     if item.strip()
 ]
 
+DAILY_REPORT_FIXED_SOURCE_URLS = [
+    item.strip()
+    for item in os.getenv("DAILY_REPORT_FIXED_SOURCE_URLS", "https://vnexpress.net/").split(",")
+    if item.strip()
+]
+
 # Memory in conversation
 MAX_CONVERSATION_HISTORY = 20
 KNOWLEDGE_MEMORY_TYPE = os.getenv("KNOWLEDGE_MEMORY_TYPE", "user_knowledge")

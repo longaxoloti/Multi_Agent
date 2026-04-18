@@ -1,8 +1,9 @@
 import logging
 import asyncio
 import random
+from collections import deque
 from datetime import datetime
-from urllib.parse import urlparse
+from urllib.parse import urlparse, urljoin
 import re
 import os
 from pathlib import Path
@@ -24,6 +25,7 @@ from main.config import (
     RESEARCH_MAX_SEARCH_QUERIES,
     RESEARCH_MAX_DISCOVERED_SOURCES,
     RESEARCH_SOURCE_ALLOWLIST,
+    DAILY_REPORT_FIXED_SOURCE_URLS,
     OLLAMA_ORCHESTRATOR_MODEL,
     OLLAMA_RESEARCH_MODEL,
 )
@@ -173,6 +175,321 @@ def _debug_log(step: str, key: str, value, prefix: str = ""):
 
 # END DEBUG
 
+
+def _is_crawlable_seed_url(url: str) -> bool:
+    lowered = (url or "").strip().lower()
+    if not lowered:
+        return False
+    if not (lowered.startswith("http://") or lowered.startswith("https://")):
+        return False
+    if lowered.endswith((".jpg", ".jpeg", ".png", ".gif", ".webp", ".svg", ".css", ".js")):
+        return False
+    return True
+
+
+def _is_news_hub_url(url: str) -> bool:
+    """Detect if URL is a news hub/category/dashboard page (contains multiple articles)."""
+    lowered = (url or "").strip().lower()
+    # Pattern: URLs with /hub/, /category/, /news/, /topic/, /tag/, /section/ typically contain multiple articles
+    hub_patterns = ["/hub/", "/category/", "/news/", "/topic/", "/tag/", "/section/"]
+    return any(pattern in lowered for pattern in hub_patterns)
+
+
+def _is_listing_seed_url(url: str) -> bool:
+    """Detect generic listing pages (homepages/category pages) that aggregate many article links."""
+    parsed = urlparse((url or "").strip())
+    if parsed.scheme not in {"http", "https"}:
+        return False
+    domain = _normalize_domain(url)
+    path = (parsed.path or "/").strip() or "/"
+    if path == "/":
+        return domain in {
+            "vnexpress.net",
+            "cafef.vn",
+            "techcrunch.com",
+            "apnews.com",
+            "bbc.com",
+            "theguardian.com",
+            "nytimes.com",
+        }
+    return _is_news_hub_url(url)
+
+
+def _extract_article_links_from_markdown(markdown: str, base_url: str) -> list[dict[str, str]]:
+    """Extract article links from hub page markdown."""
+    if not markdown:
+        return []
+    
+    # Pattern to match markdown links: [text](url "optional title")
+    link_pattern = re.compile(r'\[([^\]]+)\]\(([^)\s]+)(?:\s+"[^"]*")?\)')
+    base_domain = _normalize_domain(base_url)
+    
+    article_links: list[dict[str, str]] = []
+    seen = set()
+    
+    for match in link_pattern.finditer(markdown):
+        link_text = match.group(1).strip()
+        link_url = match.group(2).strip()
+        if " " in link_url:
+            link_url = link_url.split(" ", 1)[0].strip()
+        link_url = link_url.strip("<>'\"")
+        
+        if not link_url:
+            continue
+        
+        # Convert relative URLs to absolute
+        if not link_url.startswith(('http://', 'https://')):
+            link_url = urljoin(base_url, link_url)
+
+        if link_url in seen or link_url.rstrip("/") == base_url.rstrip("/"):
+            continue
+
+        # Keep extraction focused on the same publisher domain.
+        if _normalize_domain(link_url) != base_domain:
+            continue
+        
+        # Skip common non-article URLs
+        skip_patterns = [
+            "/rss", ".rss", "xml", "/feed", "/sitemap",
+            "/contact", "/about", "/privacy", "/terms",
+            "/archive", "/search", "/login", "/subscribe",
+            "/video", ".mp4", ".mp3", "/gallery"
+        ]
+        if any(pattern in link_url.lower() for pattern in skip_patterns):
+            continue
+        
+        # Skip if it's just domain root or hub page itself
+        if not link_text or len(link_text) < 3:
+            continue
+        
+        # Prefer links that look like news articles (longer text, not just single word)
+        if len(link_text) > 5:
+            seen.add(link_url)
+            article_links.append({"url": link_url, "title": link_text})
+    
+    return article_links
+
+
+def _tokenize_for_match(text: str) -> set[str]:
+    cleaned = re.sub(r"[^\w\sÀ-ỹ]", " ", (text or "").lower(), flags=re.UNICODE)
+    tokens = {tok for tok in cleaned.split() if len(tok) >= 3}
+    stop = {
+        "the", "and", "for", "with", "that", "this", "from", "into", "after", "over", "under",
+        "cua", "cho", "voi", "nhung", "trong", "sau", "truoc", "mot", "nhieu", "theo", "lai",
+    }
+    return {tok for tok in tokens if tok not in stop}
+
+
+def _best_article_url_for_headline(headline: str, articles: list[dict], fallback_source: str) -> str:
+    headline_tokens = _tokenize_for_match(headline)
+    if not headline_tokens:
+        return fallback_source
+
+    best_url = fallback_source
+    best_score = 0.0
+    fallback_domain = _normalize_domain(fallback_source)
+    domain_candidate = ""
+
+    for article in articles:
+        article_url = (article.get("source_url") or "").strip()
+        if not article_url:
+            continue
+        if not domain_candidate and _normalize_domain(article_url) == fallback_domain:
+            domain_candidate = article_url
+
+        title_hint = (article.get("title_hint") or "").strip()
+        title_tokens = _tokenize_for_match(title_hint)
+        content_preview = (article.get("content") or "")[:1200]
+        content_tokens = _tokenize_for_match(content_preview)
+
+        title_overlap = len(headline_tokens & title_tokens)
+        content_overlap = len(headline_tokens & content_tokens)
+        score = (3.0 * title_overlap) + (1.0 * content_overlap)
+
+        if score > best_score:
+            best_score = score
+            best_url = article_url
+
+    if best_score > 0:
+        return best_url
+    if domain_candidate:
+        return domain_candidate
+    return fallback_source
+
+
+def _rewrite_hub_sources_with_article_urls(
+    result_text: str,
+    *,
+    articles: list[dict],
+    hub_urls: list[str],
+) -> str:
+    if not result_text:
+        return result_text
+
+    normalized_hubs = {u.rstrip("/") for u in hub_urls if u}
+    if not normalized_hubs:
+        return result_text
+
+    lines = result_text.splitlines()
+    if not lines:
+        return result_text
+
+    def _extract_headline(before_idx: int) -> str:
+        for idx in range(before_idx, -1, -1):
+            candidate = lines[idx].strip()
+            if not candidate:
+                continue
+            if candidate.startswith("**"):
+                return candidate.strip("*").strip()
+        return ""
+
+    for i, line in enumerate(lines):
+        stripped = line.strip()
+        if not stripped.lower().startswith("- source:"):
+            continue
+
+        current_source = stripped.split(":", 1)[1].strip()
+        if not current_source:
+            continue
+
+        normalized_current = current_source.rstrip("/")
+        if normalized_current not in normalized_hubs:
+            continue
+
+        headline = _extract_headline(i - 1)
+        replacement = _best_article_url_for_headline(headline, articles, current_source)
+        if replacement and replacement != current_source:
+            indent = line[: len(line) - len(line.lstrip())]
+            lines[i] = f"{indent}- Source: {replacement}"
+
+    return "\n".join(lines)
+
+
+async def _collect_context_from_fixed_urls(urls: list[str]) -> tuple[str, list[str]]:
+    context_parts: list[str] = []
+    crawled_urls: list[str] = []
+    seen_seed_urls: set[str] = set()
+    seen_article_urls: set[str] = set()
+
+    # Stop by total evidence size instead of fixed "N articles per source".
+    context_char_budget = int(os.getenv("DAILY_FIXED_SOURCE_CONTEXT_CHAR_BUDGET", "180000"))
+    running_context_chars = 0
+
+    per_source_queues: dict[str, deque[dict[str, str]]] = {}
+    source_order: list[str] = []
+
+    for raw_url in urls:
+        source_url = (raw_url or "").strip()
+        if not source_url or source_url in seen_seed_urls:
+            continue
+        seen_seed_urls.add(source_url)
+        if not _is_crawlable_seed_url(source_url):
+            logger.warning("Skip non-crawlable fixed source URL: %s", source_url)
+            continue
+
+        source_domain = _normalize_domain(source_url)
+        seed_markdown = await crawl_url_to_markdown(source_url)
+        if not seed_markdown:
+            logger.info("Fixed-source crawl returned empty content: %s", source_url)
+            continue
+
+        extracted_links = _extract_article_links_from_markdown(seed_markdown, source_url)
+        is_listing = _is_listing_seed_url(source_url) or len(extracted_links) >= 8
+
+        queue_items: list[dict[str, str]] = []
+        if is_listing and extracted_links:
+            logger.info(
+                "Detected listing source, extracted %d article links: %s",
+                len(extracted_links),
+                source_url,
+            )
+            for item in extracted_links:
+                article_url = (item.get("url") or "").strip()
+                if not article_url or article_url in seen_article_urls:
+                    continue
+                seen_article_urls.add(article_url)
+                queue_items.append(
+                    {
+                        "url": article_url,
+                        "title": (item.get("title") or "").strip(),
+                        "domain": _normalize_domain(article_url),
+                    }
+                )
+        else:
+            # Treat as single-article source when no listing signal is found.
+            queue_items.append(
+                {
+                    "url": source_url,
+                    "title": "fixed_source",
+                    "domain": source_domain,
+                    "prefetched_content": seed_markdown,
+                }
+            )
+
+        if not queue_items:
+            # Fallback to seed markdown when link extraction is empty.
+            queue_items.append(
+                {
+                    "url": source_url,
+                    "title": "fixed_source",
+                    "domain": source_domain,
+                    "prefetched_content": seed_markdown,
+                }
+            )
+
+        per_source_queues[source_url] = deque(queue_items)
+        source_order.append(source_url)
+
+    if not source_order:
+        return "", []
+
+    # Balanced crawl: one article per source each round until all queues are exhausted
+    # or the global context budget is reached.
+    progress_made = True
+    while progress_made:
+        progress_made = False
+        for source_url in source_order:
+            queue = per_source_queues.get(source_url)
+            if not queue:
+                continue
+
+            while queue:
+                candidate = queue.popleft()
+                article_url = (candidate.get("url") or "").strip()
+                if not article_url or article_url in crawled_urls:
+                    continue
+
+                article_markdown = (candidate.get("prefetched_content") or "").strip()
+                if not article_markdown:
+                    article_markdown = await crawl_url_to_markdown(article_url)
+
+                if not article_markdown or len(article_markdown.strip()) < 100:
+                    logger.debug("Article crawl returned insufficient content: %s", article_url)
+                    continue
+
+                estimated_next_size = running_context_chars + len(article_markdown)
+                if estimated_next_size > context_char_budget and context_parts:
+                    logger.info(
+                        "Stop fixed-source crawl due to context budget (%s chars).",
+                        context_char_budget,
+                    )
+                    return "\n\n".join(context_parts).strip(), crawled_urls
+
+                crawled_urls.append(article_url)
+                context_parts.append(
+                    f"=== CRAWL4AI ARTICLE ===\n"
+                    f"URL: {article_url}\n"
+                    f"DOMAIN: {(candidate.get('domain') or _normalize_domain(article_url)).strip()}\n"
+                    f"TITLE_HINT: {(candidate.get('title') or '').strip()}\n"
+                    f"CONTENT:\n{article_markdown}"
+                )
+                running_context_chars = estimated_next_size
+                progress_made = True
+                # Move to next source after one successful article for fairness.
+                break
+
+    return "\n\n".join(context_parts).strip(), crawled_urls
+
 async def research_node(state: AgentState) -> dict:
     logger.info("--- RESEARCH NODE ---")
     await unload_model(OLLAMA_ORCHESTRATOR_MODEL)
@@ -193,12 +510,39 @@ async def research_node(state: AgentState) -> dict:
 
     research_query = (search_query or "").strip() or (topic or "").strip() or user_text.strip()
     persist_enabled = bool(state.get("persist_research_to_db", True))
+    report_mode = (
+        str(state.get("report_mode") or ctx.get("report_mode") or "").strip().lower()
+    )
+    fixed_source_urls = (
+        state.get("fixed_source_urls")
+        or ctx.get("fixed_source_urls")
+        or DAILY_REPORT_FIXED_SOURCE_URLS
+    )
+    if not isinstance(fixed_source_urls, list):
+        fixed_source_urls = DAILY_REPORT_FIXED_SOURCE_URLS
+    daily_fixed_sources_mode = report_mode in {"daily_fixed_sources", "daily_report"} or session_id.startswith("tg_daily")
     logger.info("Research query (topic-first): %r", research_query)
     _debug_log("START", "user_text", user_text)
     _debug_log("START", "topic", topic)
     _debug_log("START", "search_query", search_query)
     _debug_log("START", "research_query", research_query)
-    if not CAMOUFOX_ENABLED:
+    _debug_log("START", "report_mode", report_mode)
+    _debug_log("START", "fixed_source_urls", fixed_source_urls)
+    _debug_log("START", "daily_fixed_sources_mode", daily_fixed_sources_mode)
+    if daily_fixed_sources_mode:
+        logger.info(
+            "Research running in daily fixed-source mode (urls=%s)",
+            len(fixed_source_urls),
+        )
+        collected_context, discovered_sources = await _collect_context_from_fixed_urls(
+            fixed_source_urls
+        )
+        if not collected_context:
+            collected_context = (
+                "Research unavailable: fixed_source_urls is empty or could not be crawled. "
+                "Configure one or more reliable news URLs for daily report mode."
+            )
+    elif not CAMOUFOX_ENABLED:
         collected_context = (
             "Research unavailable: CAMOUFOX_ENABLED=false. "
             "This research flow only supports Camoufox browser crawling."
@@ -292,6 +636,9 @@ async def research_node(state: AgentState) -> dict:
         "Content filtering guidance:\n"
         "- Remove any promotional, sponsored, or irrelevant content.\n"
         "- Keep only factual and educational information.\n\n"
+        "Source citation guidance:\n"
+        "- For each item, cite a direct article URL, not a hub/category homepage.\n"
+        "- Never use fixed dashboard URLs as item-level source when article URLs are available.\n\n"
         f"Gathered context:\n{collected_context}"
     )
     _debug_log("SYNTHESIS_PREP", "model_name", OLLAMA_RESEARCH_MODEL)
@@ -311,6 +658,12 @@ async def research_node(state: AgentState) -> dict:
             [SystemMessage(content=system_prompt), HumanMessage(content=synthesis_user_prompt)]
         )
         result_text = response.content.strip()
+        if daily_fixed_sources_mode and crawled_articles:
+            result_text = _rewrite_hub_sources_with_article_urls(
+                result_text,
+                articles=crawled_articles,
+                hub_urls=fixed_source_urls,
+            )
         _debug_log("MODEL_OUTPUT", "response_length", len(result_text), prefix="chars")
         _debug_log("MODEL_OUTPUT", "full_response", result_text)
     except Exception as e:
@@ -319,13 +672,13 @@ async def research_node(state: AgentState) -> dict:
         _debug_log("MODEL_OUTPUT", "error_occurred", str(e))
 
     # =========================== Extract Sources ===================================
-    if CAMOUFOX_ENABLED:
+    if daily_fixed_sources_mode or CAMOUFOX_ENABLED:
         sources = list(dict.fromkeys(discovered_sources))[:10]
     else:
         sources = re.findall(r'https?://[^\s"<>]+', collected_context)
         sources = list(dict.fromkeys(sources))[:10]
 
-    persisted_sources = _persist_research_sources(sources)
+    persisted_sources = _persist_research_sources(sources) if persist_enabled else 0
     if persisted_sources:
         logger.info("Persisted %d research source URL(s) into bookmarks.", persisted_sources)
 
@@ -431,17 +784,118 @@ def _extract_urls_from_text(text: str) -> list[str]:
         deduped.append(normalized)
     return deduped
 
+
+def _build_topic_signal_tokens(*texts: str) -> set[str]:
+    joined = " ".join((text or "").strip().lower() for text in texts if text)
+    cleaned = re.sub(r"[^\w\sÀ-ỹ]", " ", joined, flags=re.UNICODE)
+    tokens = [token for token in re.split(r"\s+", cleaned) if token]
+    stopwords = {
+        "the", "and", "for", "with", "that", "this", "from", "into", "latest", "today", "news",
+        "thong", "tin", "moi", "nhat", "ve", "va", "cua", "la", "cac", "cho", "mot", "nhung",
+        "toi", "ban", "giup", "hay", "find", "about", "update", "current", "breaking",
+    }
+    return {token for token in tokens if len(token) >= 3 and token not in stopwords}
+
+
+def _topic_overlap_score(text: str, topic_tokens: set[str]) -> float:
+    if not text or not topic_tokens:
+        return 0.0
+    cleaned = re.sub(r"[^\w\sÀ-ỹ]", " ", (text or "").lower(), flags=re.UNICODE)
+    tokens = {token for token in re.split(r"\s+", cleaned) if len(token) >= 3}
+    if not tokens:
+        return 0.0
+    overlap = len(tokens & topic_tokens)
+    if overlap == 0:
+        return 0.0
+    return overlap / max(1, min(len(topic_tokens), 8))
+
+
+def _score_candidate_topic_relevance(candidate: dict, topic_tokens: set[str]) -> float:
+    url = (candidate.get("url") or "").strip()
+    title = (candidate.get("title") or "").strip()
+    snapshot = (candidate.get("snapshot") or "").strip()[:1200]
+
+    # Strongest signal: title and URL path; snapshot is weaker/noisy.
+    title_score = _topic_overlap_score(title, topic_tokens)
+    url_score = _topic_overlap_score(url, topic_tokens)
+    snapshot_score = _topic_overlap_score(snapshot, topic_tokens)
+
+    return (2.0 * title_score) + (1.5 * url_score) + (0.6 * snapshot_score)
+
+
+def _rank_candidates_by_topic(candidates: list[dict], topic_tokens: set[str]) -> list[dict]:
+    if not candidates:
+        return []
+
+    scored: list[dict] = []
+    for item in candidates:
+        candidate = dict(item)
+        candidate["topic_score"] = _score_candidate_topic_relevance(candidate, topic_tokens)
+        scored.append(candidate)
+
+    # Prefer allowlisted sources first when topic score ties.
+    scored.sort(
+        key=lambda row: (
+            float(row.get("topic_score") or 0.0),
+            1.0 if row.get("allowlisted") else 0.0,
+        ),
+        reverse=True,
+    )
+    return scored
+
+
+def _filter_candidates_by_topic(
+    candidates: list[dict],
+    topic_tokens: set[str],
+    *,
+    min_score: float,
+) -> list[dict]:
+    ranked = _rank_candidates_by_topic(candidates, topic_tokens)
+    filtered = [row for row in ranked if float(row.get("topic_score") or 0.0) >= min_score]
+
+    # Safety fallback: if strict filter removed all URLs, keep top few to avoid empty crawl.
+    if filtered:
+        return filtered
+    return ranked[: max(1, min(4, len(ranked)))]
+
+
+def _select_refs_by_topic_signal(
+    refs: list[tuple[str, str]],
+    topic_tokens: set[str],
+    *,
+    max_refs: int,
+) -> list[str]:
+    if not refs:
+        return []
+    if not topic_tokens:
+        return [ref_id for ref_id, _ in refs[:max_refs]]
+
+    scored = []
+    for ref_id, label in refs:
+        score = _topic_overlap_score(label, topic_tokens)
+        scored.append((ref_id, score))
+
+    scored.sort(key=lambda item: item[1], reverse=True)
+    selected: list[str] = []
+    for ref_id, _ in scored:
+        if ref_id not in selected:
+            selected.append(ref_id)
+        if len(selected) >= max_refs:
+            break
+    return selected
+
 async def _generate_search_queries(topic: str, user_text: str) -> list[str]:
     llm = get_llm(task_type="research", temperature=0.2)
     prompt = (
-        "You are a research assistant. Please generate a web search query to find reliable sources.\n"
+        "You are a research assistant. Please generate web search queries to find reliable, current sources.\n"
         f"Topic: {topic}\n"
         f"User context: {user_text}\n\n"
         "Requirements:\n"
-        "- Return only 1 query.\n"
-        "- The query should be natural, like a real user, without machine-like strings such as: site, google, .com, http.\n"
+        "- Return up to 2 queries.\n"
+        "- Each query should be natural, like a real user, without machine-like strings such as: site, google, .com, http.\n"
         "- Do not number, do not use bullet points, do not explain further.\n"
-        "- Focus on the latest information directly related to the topic."
+        "- Focus on the latest information from today or the last 24 hours.\n"
+        "- Prefer queries with terms like today, latest, current, breaking, updated."
     )
     try:
         response = await llm.ainvoke([HumanMessage(content=prompt)])
@@ -451,7 +905,7 @@ async def _generate_search_queries(topic: str, user_text: str) -> list[str]:
             compact = _compact_search_query(candidate)
             if compact and compact not in cleaned:
                 cleaned.append(compact)
-            if len(cleaned) >= 1:
+            if len(cleaned) >= RESEARCH_MAX_SEARCH_QUERIES:
                 break
         if cleaned:
             return cleaned
@@ -459,19 +913,34 @@ async def _generate_search_queries(topic: str, user_text: str) -> list[str]:
         logger.warning("Search query generation failed: %s", error)
 
     fallback = _compact_search_query(topic or user_text)
-    return [fallback] if fallback else ["latest global news"]
+    if fallback:
+        return [fallback, f"{fallback} today"][:RESEARCH_MAX_SEARCH_QUERIES]
+    return ["latest global news today", "breaking news today"][:RESEARCH_MAX_SEARCH_QUERIES]
 
 
-async def _select_refs_with_llm(snapshot_text: str, query: str, max_refs: int = 4) -> list[str]:
+async def _select_refs_with_llm(
+    snapshot_text: str,
+    query: str,
+    topic_tokens: Optional[set[str]] = None,
+    max_refs: int = 4,
+) -> list[str]:
     refs = _extract_refs_from_snapshot(snapshot_text)
     if not refs:
         return []
 
-    refs_prompt = "\n".join(f"{ref_id}: {label}" for ref_id, label in refs[:40])
+    topic_tokens = topic_tokens or set()
+    preselected_refs = _select_refs_by_topic_signal(refs, topic_tokens, max_refs=max_refs)
+    if preselected_refs:
+        refs_for_llm = [entry for entry in refs if entry[0] in set(preselected_refs)]
+    else:
+        refs_for_llm = refs[:max_refs]
+
+    refs_prompt = "\n".join(f"{ref_id}: {label}" for ref_id, label in refs_for_llm[:40])
     llm = get_llm(task_type="research", temperature=0.0)
     prompt = (
         "Select the refs corresponding to the most reliable and relevant news articles.\n"
         f"Search query: {query}\n\n"
+        "Prioritize refs that directly match the requested topic and avoid generic category pages.\n\n"
         "List of refs:\n"
         f"{refs_prompt}\n\n"
         "Return only the refs, separated by spaces (e.g., e4 e8 e12)."
@@ -480,7 +949,7 @@ async def _select_refs_with_llm(snapshot_text: str, query: str, max_refs: int = 
         response = await llm.ainvoke([HumanMessage(content=prompt)])
         selected = re.findall(r"e\d+", response.content or "")
         uniq_selected: list[str] = []
-        valid_ref_ids = {ref_id for ref_id, _ in refs}
+        valid_ref_ids = {ref_id for ref_id, _ in refs_for_llm}
         for ref_id in selected:
             if ref_id in valid_ref_ids and ref_id not in uniq_selected:
                 uniq_selected.append(ref_id)
@@ -491,7 +960,39 @@ async def _select_refs_with_llm(snapshot_text: str, query: str, max_refs: int = 
     except Exception as error:
         logger.warning("LLM ref selection failed: %s", error)
 
-    return [ref_id for ref_id, _ in refs[:max_refs]]
+    return preselected_refs[:max_refs] or [ref_id for ref_id, _ in refs[:max_refs]]
+
+
+async def _should_scroll_for_more_results(
+    snapshot_text: str,
+    query: str,
+    refs_count: int,
+    scroll_round: int,
+) -> bool:
+    if refs_count >= 8 and len((snapshot_text or "").strip()) >= 1200:
+        return False
+
+    llm = get_llm(task_type="research", temperature=0.0)
+    prompt = (
+        "Decide whether one shallow Google results scroll is needed to discover additional reliable sources.\n"
+        f"Search query: {query}\n"
+        f"Current refs count: {refs_count}\n"
+        f"Current snapshot length: {len((snapshot_text or '').strip())}\n\n"
+        f"Shallow scroll rounds already done: {scroll_round}\n\n"
+        "Rules:\n"
+        "- Answer YES only when current visible results are insufficient for source diversity/reliability.\n"
+        "- If repeated scrolling is no longer adding meaningful new candidates, answer NO.\n"
+        "- Prefer NO when there are already enough credible options.\n"
+        "- We only allow a shallow scroll, not deep scrolling.\n\n"
+        "Return exactly one token: YES or NO."
+    )
+    try:
+        response = await llm.ainvoke([HumanMessage(content=prompt)])
+        answer = (response.content or "").strip().upper()
+        return answer.startswith("YES")
+    except Exception as error:
+        logger.warning("LLM scroll decision failed: %s", error)
+        return refs_count < 4 or len((snapshot_text or "").strip()) < 700
 
 
 async def _rerank_non_allowlisted_sources(topic: str, candidates: list[dict]) -> list[dict]:
@@ -576,9 +1077,12 @@ async def perform_camoufox_direct_crawl(
     if (search_query_override or "").strip() and (search_query_override or "").strip().upper() != "NONE":
         search_queries = [_compact_search_query(search_query_override)]
     else:
-        search_queries = (await _generate_search_queries(topic=topic, user_text=user_text))[:1]
-    logger.info("Research evidence | generated_queries=%s max_used=1", search_queries)
+        search_queries = (await _generate_search_queries(topic=topic, user_text=user_text))[:RESEARCH_MAX_SEARCH_QUERIES]
+    logger.info("Research evidence | generated_queries=%s max_used=%s", search_queries, RESEARCH_MAX_SEARCH_QUERIES)
     _debug_log("CAMOUFOX_START", "search_queries_generated", search_queries)
+
+    topic_tokens = _build_topic_signal_tokens(topic, user_text, search_query_override)
+    _debug_log("CAMOUFOX_START", "topic_signal_tokens", sorted(topic_tokens))
 
     google_guard = GoogleGuard(
         config=GoogleGuardConfig(
@@ -678,6 +1182,62 @@ async def perform_camoufox_direct_crawl(
                     snapshot_text = str(first_page.get("snapshot") or "")
                     refs_count = int(first_page.get("refsCount") or 0)
 
+                    scroll_attempts = 0
+                    while True:
+                        if scroll_attempts >= 8:
+                            logger.info(
+                                "Research evidence | shallow_scroll_guard_stop query=%s attempts=%s",
+                                search_query,
+                                scroll_attempts,
+                            )
+                            break
+
+                        should_scroll = await _should_scroll_for_more_results(
+                            snapshot_text=snapshot_text,
+                            query=search_query,
+                            refs_count=refs_count,
+                            scroll_round=scroll_attempts,
+                        )
+                        if not should_scroll:
+                            break
+                        if not hasattr(browser, "scroll_for_more_results"):
+                            break
+
+                        before_urls = set(_extract_urls_from_text(snapshot_text))
+                        scrolled = await browser.scroll_for_more_results(
+                            tab_id,
+                            steps=1,
+                            pixels_per_step=280,
+                        )
+                        if not scrolled:
+                            break
+
+                        await _behavior_pause(multiplier=0.6)
+                        after_scroll_page = await browser.get_snapshot_page(tab_id)
+                        if not after_scroll_page:
+                            break
+
+                        next_snapshot = str(after_scroll_page.get("snapshot") or "")
+                        after_urls = set(_extract_urls_from_text(next_snapshot))
+                        newly_discovered = len(after_urls - before_urls)
+
+                        page_url = str(after_scroll_page.get("url") or page_url)
+                        snapshot_text = next_snapshot
+                        refs_count = int(after_scroll_page.get("refsCount") or refs_count)
+                        first_page = after_scroll_page
+                        scroll_attempts += 1
+
+                        logger.info(
+                            "Research evidence | shallow_scroll query=%s attempt=%s new_urls=%s refs=%s",
+                            search_query,
+                            scroll_attempts,
+                            newly_discovered,
+                            refs_count,
+                        )
+
+                        if newly_discovered == 0:
+                            break
+
                     if _looks_like_bot_challenge(page_url, snapshot_text):
                         bot_detected_count += 1
                         google_guard.mark_challenge(reason=f"serp_challenge:{page_url}")
@@ -731,7 +1291,12 @@ async def perform_camoufox_direct_crawl(
                             }
                         )
 
-                    selected_refs = await _select_refs_with_llm(snapshot_text=snapshot_text, query=search_query, max_refs=4)
+                    selected_refs = await _select_refs_with_llm(
+                        snapshot_text=snapshot_text,
+                        query=search_query,
+                        topic_tokens=topic_tokens,
+                        max_refs=4,
+                    )
                     logger.info(
                         "Research evidence | query=%s refs_selected=%s refs_count=%s",
                         search_query,
@@ -768,14 +1333,24 @@ async def perform_camoufox_direct_crawl(
                             (label for candidate_ref, label in _extract_refs_from_snapshot(snapshot_text) if candidate_ref == ref_id),
                             "",
                         )
-                        discovered_candidates.append(
-                            {
-                                "url": landed_url,
-                                "title": ref_title,
-                                "domain": domain,
-                                "allowlisted": _is_allowlisted_domain(domain),
-                            }
-                        )
+                        candidate = {
+                            "url": landed_url,
+                            "title": ref_title,
+                            "domain": domain,
+                            "allowlisted": _is_allowlisted_domain(domain),
+                            "snapshot": str(landed_page.get("snapshot") or "")[:1200],
+                        }
+                        topic_score = _score_candidate_topic_relevance(candidate, topic_tokens)
+                        candidate["topic_score"] = topic_score
+                        if topic_tokens and topic_score < 0.18:
+                            logger.info(
+                                "Research evidence | skip_low_topic_signal ref=%s url=%s score=%.3f",
+                                ref_id,
+                                landed_url,
+                                topic_score,
+                            )
+                            continue
+                        discovered_candidates.append(candidate)
 
                     collected_segments = [snapshot_text]
                     next_offset = first_page.get("nextOffset")
@@ -832,7 +1407,30 @@ async def perform_camoufox_direct_crawl(
             "bot_detected_count": bot_detected_count,
         }
 
-    selected_sources = await _select_sources_hybrid(topic=topic, candidates=discovered_candidates)
+    topic_filtered_candidates = _filter_candidates_by_topic(
+        discovered_candidates,
+        topic_tokens,
+        min_score=0.14,
+    )
+    logger.info(
+        "Research evidence | topic_filtered_candidates=%s of discovered=%s",
+        len(topic_filtered_candidates),
+        len(discovered_candidates),
+    )
+    _debug_log(
+        "CAMOUFOX_URL_SELECTION",
+        "topic_filtered_candidates",
+        [
+            {
+                "url": c.get("url"),
+                "topic_score": c.get("topic_score", 0.0),
+                "title": (c.get("title") or "")[:120],
+            }
+            for c in topic_filtered_candidates[:20]
+        ],
+    )
+
+    selected_sources = await _select_sources_hybrid(topic=topic, candidates=topic_filtered_candidates)
     selected_urls = [source["url"] for source in selected_sources]
     logger.info("Research evidence | selected_urls=%s", selected_urls)
     _debug_log("CAMOUFOX_URL_SELECTION", "selected_sources_count", len(selected_sources))
