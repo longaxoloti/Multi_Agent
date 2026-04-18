@@ -397,6 +397,35 @@ class CamoFoxMCPClient:
             logger.error("CamoFox MCP click failed: %s", error)
             return False
 
+    async def scroll_for_more_results(
+        self,
+        tab_id: str,
+        *,
+        steps: int = 1,
+        pixels_per_step: int = 280,
+    ) -> bool:
+        bounded_steps = max(1, min(2, int(steps)))
+        bounded_pixels = max(160, min(420, int(pixels_per_step)))
+
+        try:
+            for _ in range(bounded_steps):
+                payload = await self._call_tool_variants(
+                    ["scroll", "scroll_page", "scroll_down", "mouse_wheel", "wheel"],
+                    [
+                        {"tabId": tab_id, "deltaY": bounded_pixels, "userId": self.user_id},
+                        {"tabId": tab_id, "y": bounded_pixels, "userId": self.user_id},
+                        {"tabId": tab_id, "pixels": bounded_pixels, "userId": self.user_id},
+                        {"tabId": tab_id, "deltaY": bounded_pixels},
+                        {"tab_id": tab_id, "deltaY": bounded_pixels},
+                    ],
+                )
+                self._snapshot_cache[tab_id] = payload
+                await asyncio.sleep(0.25)
+            return True
+        except Exception as error:
+            logger.info("CamoFox MCP scroll_for_more_results unavailable/failed for tab=%s: %s", tab_id, error)
+            return False
+
     @staticmethod
     def _extract_snapshot_payload(payload: dict[str, Any]) -> dict[str, Any]:
         snapshot_value = (

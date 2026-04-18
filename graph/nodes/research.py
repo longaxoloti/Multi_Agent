@@ -7,6 +7,7 @@ from urllib.parse import urlparse, urljoin
 import re
 import os
 from pathlib import Path
+from typing import Optional
 from tools.web_search.crawl4ai_client import crawl_url_to_markdown
 from langchain_core.messages import HumanMessage, SystemMessage
 from graph.state import AgentState
@@ -113,14 +114,53 @@ def _persist_crawled_articles(
     if not articles:
         return {"saved": 0, "deduplicated": 0, "failed": 0}
 
+    topic_tokens = _build_topic_signal_tokens(topic, query)
+    min_db_topic_score = float(os.getenv("RESEARCH_DB_TOPIC_MIN_SCORE", "0.30"))
+
+    filtered_articles: list[dict] = []
+    skipped_off_topic = 0
+    for item in articles:
+        source_url = (item.get("source_url") or "").strip()
+        title_hint = (item.get("title_hint") or "").strip()
+        content = (item.get("content") or "")
+
+        score = _score_crawled_article_topic_relevance(
+            url=source_url,
+            title=title_hint,
+            content=content,
+            topic_tokens=topic_tokens,
+        )
+        if topic_tokens and score < min_db_topic_score:
+            skipped_off_topic += 1
+            logger.info(
+                "Research DB filter | skip_off_topic url=%s score=%.3f min=%.3f",
+                source_url,
+                score,
+                min_db_topic_score,
+            )
+            continue
+        filtered_articles.append(item)
+
+    if skipped_off_topic:
+        logger.info(
+            "Research DB filter | topic=%s query=%s kept=%s skipped_off_topic=%s",
+            topic,
+            query,
+            len(filtered_articles),
+            skipped_off_topic,
+        )
+
+    if not filtered_articles:
+        return {"saved": 0, "deduplicated": 0, "failed": 0}
+
     try:
         knowledge_service = _get_knowledge_service()
     except Exception as exc:
         logger.debug("Knowledge service unavailable; skip article persistence: %s", exc)
-        return {"saved": 0, "deduplicated": 0, "failed": len(articles)}
+        return {"saved": 0, "deduplicated": 0, "failed": len(filtered_articles)}
 
     counters = {"saved": 0, "deduplicated": 0, "failed": 0}
-    for item in articles:
+    for item in filtered_articles:
         source_url = item.get("source_url", "")
         title = item.get("title_hint", "") or source_url
         content = item.get("content", "")
@@ -770,6 +810,48 @@ def _extract_refs_from_snapshot(snapshot_text: str) -> list[tuple[str, str]]:
         refs.append((ref_id, label[:180]))
     return refs
 
+
+def _build_ref_candidates(snapshot_text: str, refs_details: Optional[list[dict]] = None) -> list[dict]:
+    candidates: list[dict] = []
+    seen: set[str] = set()
+
+    for item in refs_details or []:
+        ref_id = str((item or {}).get("refId") or "").strip()
+        if not ref_id or ref_id in seen:
+            continue
+        title = str((item or {}).get("title") or "").strip()
+        if len(title) < 6:
+            continue
+        candidates.append(
+            {
+                "ref_id": ref_id,
+                "title": title[:180],
+                "url": str((item or {}).get("url") or "").strip(),
+                "domain": str((item or {}).get("domain") or "").strip(),
+                "path": str((item or {}).get("path") or "").strip(),
+            }
+        )
+        seen.add(ref_id)
+
+    if candidates:
+        return candidates
+
+    # Backward-compatible fallback when browser client doesn't provide refsDetails.
+    for ref_id, label in _extract_refs_from_snapshot(snapshot_text):
+        if ref_id in seen:
+            continue
+        candidates.append(
+            {
+                "ref_id": ref_id,
+                "title": label,
+                "url": "",
+                "domain": "",
+                "path": "",
+            }
+        )
+        seen.add(ref_id)
+    return candidates
+
 def _extract_urls_from_text(text: str) -> list[str]:
     urls = re.findall(r"https?://[^\s\"'<>\)\]]+", text or "")
     deduped: list[str] = []
@@ -823,6 +905,29 @@ def _score_candidate_topic_relevance(candidate: dict, topic_tokens: set[str]) ->
     return (2.0 * title_score) + (1.5 * url_score) + (0.6 * snapshot_score)
 
 
+def _score_crawled_article_topic_relevance(
+    *,
+    url: str,
+    title: str,
+    content: str,
+    topic_tokens: set[str],
+) -> float:
+    if not topic_tokens:
+        return 1.0
+
+    candidate = {
+        "url": url,
+        "title": title,
+        "snapshot": (content or "")[:2200],
+    }
+    base_score = _score_candidate_topic_relevance(candidate, topic_tokens)
+
+    # Add a light content-only overlap bonus so genuine topical articles win,
+    # while generic category pages are demoted.
+    content_bonus = 0.8 * _topic_overlap_score((content or "")[:2200], topic_tokens)
+    return base_score + content_bonus
+
+
 def _rank_candidates_by_topic(candidates: list[dict], topic_tokens: set[str]) -> list[dict]:
     if not candidates:
         return []
@@ -860,7 +965,7 @@ def _filter_candidates_by_topic(
 
 
 def _select_refs_by_topic_signal(
-    refs: list[tuple[str, str]],
+    refs: list[dict],
     topic_tokens: set[str],
     *,
     max_refs: int,
@@ -868,11 +973,19 @@ def _select_refs_by_topic_signal(
     if not refs:
         return []
     if not topic_tokens:
-        return [ref_id for ref_id, _ in refs[:max_refs]]
+        return [str(ref.get("ref_id") or "") for ref in refs[:max_refs] if ref.get("ref_id")]
 
     scored = []
-    for ref_id, label in refs:
-        score = _topic_overlap_score(label, topic_tokens)
+    for ref in refs:
+        ref_id = str(ref.get("ref_id") or "").strip()
+        if not ref_id:
+            continue
+        title = str(ref.get("title") or "")
+        path = str(ref.get("path") or "")
+        url = str(ref.get("url") or "")
+        score = (2.0 * _topic_overlap_score(title, topic_tokens)) + (
+            1.5 * _topic_overlap_score(path, topic_tokens)
+        ) + (1.0 * _topic_overlap_score(url, topic_tokens))
         scored.append((ref_id, score))
 
     scored.sort(key=lambda item: item[1], reverse=True)
@@ -921,26 +1034,38 @@ async def _generate_search_queries(topic: str, user_text: str) -> list[str]:
 async def _select_refs_with_llm(
     snapshot_text: str,
     query: str,
+    refs_details: Optional[list[dict]] = None,
     topic_tokens: Optional[set[str]] = None,
     max_refs: int = 4,
 ) -> list[str]:
-    refs = _extract_refs_from_snapshot(snapshot_text)
+    refs = _build_ref_candidates(snapshot_text, refs_details)
     if not refs:
         return []
 
     topic_tokens = topic_tokens or set()
     preselected_refs = _select_refs_by_topic_signal(refs, topic_tokens, max_refs=max_refs)
     if preselected_refs:
-        refs_for_llm = [entry for entry in refs if entry[0] in set(preselected_refs)]
+        refs_for_llm = [entry for entry in refs if str(entry.get("ref_id") or "") in set(preselected_refs)]
     else:
         refs_for_llm = refs[:max_refs]
 
-    refs_prompt = "\n".join(f"{ref_id}: {label}" for ref_id, label in refs_for_llm[:40])
+    refs_prompt = "\n".join(
+        (
+            f"{ref.get('ref_id')}: "
+            f"title={str(ref.get('title') or '')[:140]} | "
+            f"domain={str(ref.get('domain') or '')[:80]} | "
+            f"path={str(ref.get('path') or '')[:140]} | "
+            f"url={str(ref.get('url') or '')[:220]}"
+        )
+        for ref in refs_for_llm[:40]
+    )
     llm = get_llm(task_type="research", temperature=0.0)
     prompt = (
         "Select the refs corresponding to the most reliable and relevant news articles.\n"
         f"Search query: {query}\n\n"
-        "Prioritize refs that directly match the requested topic and avoid generic category pages.\n\n"
+        "Prioritize refs that directly match the requested topic and avoid generic category pages.\n"
+        "Prefer links where title and URL path both contain topic signals.\n"
+        "Avoid URLs that look like broad hubs/categories unless they explicitly match the topic.\n\n"
         "List of refs:\n"
         f"{refs_prompt}\n\n"
         "Return only the refs, separated by spaces (e.g., e4 e8 e12)."
@@ -949,7 +1074,7 @@ async def _select_refs_with_llm(
         response = await llm.ainvoke([HumanMessage(content=prompt)])
         selected = re.findall(r"e\d+", response.content or "")
         uniq_selected: list[str] = []
-        valid_ref_ids = {ref_id for ref_id, _ in refs_for_llm}
+        valid_ref_ids = {str(ref.get("ref_id") or "") for ref in refs_for_llm}
         for ref_id in selected:
             if ref_id in valid_ref_ids and ref_id not in uniq_selected:
                 uniq_selected.append(ref_id)
@@ -960,7 +1085,8 @@ async def _select_refs_with_llm(
     except Exception as error:
         logger.warning("LLM ref selection failed: %s", error)
 
-    return preselected_refs[:max_refs] or [ref_id for ref_id, _ in refs[:max_refs]]
+    fallback_refs = [str(ref.get("ref_id") or "") for ref in refs[:max_refs] if ref.get("ref_id")]
+    return preselected_refs[:max_refs] or fallback_refs
 
 
 async def _should_scroll_for_more_results(
@@ -1294,6 +1420,7 @@ async def perform_camoufox_direct_crawl(
                     selected_refs = await _select_refs_with_llm(
                         snapshot_text=snapshot_text,
                         query=search_query,
+                        refs_details=first_page.get("refsDetails") if isinstance(first_page, dict) else None,
                         topic_tokens=topic_tokens,
                         max_refs=4,
                     )
@@ -1454,6 +1581,7 @@ async def perform_camoufox_direct_crawl(
 
     crawled_urls: list[str] = []
     total_crawled_chars = 0
+    min_post_crawl_topic_score = float(os.getenv("RESEARCH_POST_CRAWL_TOPIC_MIN_SCORE", "0.28"))
     for source in selected_sources:
         source_url = source["url"]
         source_domain = source.get("domain", "")
@@ -1480,6 +1608,31 @@ async def perform_camoufox_direct_crawl(
         if not article_markdown:
             logger.info("Research evidence | crawl_empty url=%s", source_url)
             _debug_log("CRAWL4AI_RESULT", "crawl_failed_empty", source_url)
+            continue
+
+        post_crawl_topic_score = _score_crawled_article_topic_relevance(
+            url=source_url,
+            title=source_title,
+            content=article_markdown,
+            topic_tokens=topic_tokens,
+        )
+        if topic_tokens and post_crawl_topic_score < min_post_crawl_topic_score:
+            logger.info(
+                "Research evidence | skip_post_crawl_low_topic url=%s score=%.3f min=%.3f",
+                source_url,
+                post_crawl_topic_score,
+                min_post_crawl_topic_score,
+            )
+            _debug_log(
+                "CRAWL4AI_RESULT",
+                "post_crawl_topic_rejected",
+                {
+                    "url": source_url,
+                    "title": source_title,
+                    "score": post_crawl_topic_score,
+                    "min": min_post_crawl_topic_score,
+                },
+            )
             continue
 
         crawled_urls.append(source_url)
@@ -1514,7 +1667,7 @@ async def perform_camoufox_direct_crawl(
 
     return {
         "context": context_text,
-        "sources": crawled_urls or selected_urls,
+        "sources": crawled_urls,
         "discovered_urls": selected_urls,
         "bot_detected_count": bot_detected_count,
     }

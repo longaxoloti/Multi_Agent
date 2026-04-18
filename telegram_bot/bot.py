@@ -105,19 +105,6 @@ class TelegramBot:
         return [dt_time(hour=BRIEFING_HOUR, minute=BRIEFING_MINUTE, tzinfo=ZoneInfo(AIRFLOW_TIMEZONE))]
 
     @staticmethod
-    def _build_scheduled_prompt(now_utc: datetime) -> str:
-        start_utc = now_utc - timedelta(hours=12)
-        return (
-            "Research and summarize the latest and most notable world news.\n"
-            f"Time window: {start_utc.strftime('%Y-%m-%d %H:%M UTC')} -> {now_utc.strftime('%Y-%m-%d %H:%M UTC')}\n"
-            "Requirements:\n"
-            "1) Focus on high-impact stories covered by multiple sources.\n"
-            "2) Include clear source citations (URL) for each key point.\n"
-            "3) If uncertainty exists, explicitly state confidence level.\n"
-            "4) Return a concise Telegram-friendly briefing."
-        )
-
-    @staticmethod
     def _build_topic_prompt(now_utc: datetime, topic_label: str, topic_query: str) -> str:
         start_utc = now_utc - timedelta(hours=12)
         return (

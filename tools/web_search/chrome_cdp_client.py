@@ -182,12 +182,33 @@ class ChromeCDPClient:
         try:
             await page.goto(url, wait_until="domcontentloaded")
             await self._inject_virtual_cursor(page)
-            # Smooth scroll down a bit after loading to simulate human reading
-            await self._smooth_scroll(page)
             await self._capture_html(page)
             return True
         except Exception as e:
             logger.error(f"CDP navigate failed: {e}")
+            return False
+
+    async def scroll_for_more_results(
+        self,
+        tab_id: str,
+        *,
+        steps: int = 1,
+        pixels_per_step: int = 280,
+    ) -> bool:
+        page = self._pages.get(tab_id)
+        if not page:
+            return False
+
+        bounded_steps = max(1, min(2, int(steps)))
+        bounded_pixels = max(160, min(420, int(pixels_per_step)))
+        try:
+            for _ in range(bounded_steps):
+                await page.mouse.wheel(0, bounded_pixels)
+                await asyncio.sleep(0.25)
+            await self._capture_html(page)
+            return True
+        except Exception as e:
+            logger.error(f"CDP scroll_for_more_results failed: {e}")
             return False
 
     async def _inject_virtual_cursor(self, page: Page):
@@ -293,6 +314,8 @@ class ChromeCDPClient:
                 let links = Array.from(document.querySelectorAll('a[href]'));
                 let refs = [];
                 let urlMap = {};
+                let refsDetails = [];
+                let seenActualUrls = new Set();
                 let count = 0;
                 
                 let ignoreDomains = ['google.com/support', 'accounts.google.com', 'support.google.com', 'maps.google.com', 'policies.google.com', 'youtube.com'];
@@ -312,6 +335,8 @@ class ChromeCDPClient:
                     }
                     
                     if (actualUrl.includes('google.com/search') || actualUrl.includes('google.com/preferences')) return;
+                    if (seenActualUrls.has(actualUrl)) return;
+                    seenActualUrls.add(actualUrl);
                     
                     let title = (a.innerText || "").trim().replace(/\\n/g, ' ').substring(0, 150);
                     // Filter out very short texts or just navigation elements
@@ -319,6 +344,24 @@ class ChromeCDPClient:
                         let refId = 'e' + count;
                         refs.push(`[link ${refId}] ${title}`);
                         urlMap[refId] = actualUrl;
+                        try {
+                            let parsed = new URL(actualUrl);
+                            refsDetails.push({
+                                refId: refId,
+                                title: title,
+                                url: actualUrl,
+                                domain: parsed.hostname || '',
+                                path: parsed.pathname || '',
+                            });
+                        } catch (e) {
+                            refsDetails.push({
+                                refId: refId,
+                                title: title,
+                                url: actualUrl,
+                                domain: '',
+                                path: '',
+                            });
+                        }
                         count++;
                     }
                 });
@@ -327,6 +370,7 @@ class ChromeCDPClient:
                 return {
                     text: snapshotText,
                     urlMap: urlMap,
+                    refsDetails: refsDetails,
                     url: document.location.href,
                     refsCount: count
                 };
@@ -339,6 +383,7 @@ class ChromeCDPClient:
             return {
                 "url": result["url"],
                 "snapshot": result["text"],
+                "refsDetails": result.get("refsDetails", []),
                 "refsCount": result["refsCount"],
                 "truncated": False,
                 "hasMore": False,
