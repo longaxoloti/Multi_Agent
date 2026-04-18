@@ -20,8 +20,13 @@ from typing import Optional
 from sqlalchemy import text
 
 from main.config import KNOWLEDGE_EMBEDDING_DIMS, KNOWLEDGE_EMBEDDING_MODEL
+from rag.vector_chunking import aggregate_chunk_embeddings, chunk_text_for_embedding
 from storage.trusted_db import AgentDBRepository
 from tools.knowledge.embedding_provider import embed_text_ollama
+
+
+_KNOWLEDGE_EMBEDDING_CHUNK_SIZE = 1200
+_KNOWLEDGE_EMBEDDING_CHUNK_OVERLAP = 150
 
 
 def _utcnow() -> datetime:
@@ -95,16 +100,43 @@ class UnifiedMemoryService:
         return "dedup_hard"
 
     def _build_embedding(self, text: str) -> list[float]:
-        vector = self._embedder(
-            text,
-            model=self._embedding_model,
-            expected_dims=self._embedding_dims,
+        normalized_text = (text or "").strip()
+        if not normalized_text:
+            raise ValueError("content is empty")
+
+        chunks = chunk_text_for_embedding(
+            normalized_text,
+            chunk_size=_KNOWLEDGE_EMBEDDING_CHUNK_SIZE,
+            chunk_overlap=_KNOWLEDGE_EMBEDDING_CHUNK_OVERLAP,
         )
-        if len(vector) != self._embedding_dims:
-            raise ValueError(
-                f"Embedding dimension mismatch: got {len(vector)}, expected {self._embedding_dims}."
+        if not chunks:
+            raise ValueError("content produced no embedding chunks")
+
+        vectors: list[list[float]] = []
+        weights: list[float] = []
+
+        for chunk in chunks:
+            vector = self._embedder(
+                chunk,
+                model=self._embedding_model,
+                expected_dims=self._embedding_dims,
             )
-        return vector
+            if len(vector) != self._embedding_dims:
+                raise ValueError(
+                    f"Embedding dimension mismatch: got {len(vector)}, expected {self._embedding_dims}."
+                )
+            vectors.append(vector)
+            weights.append(float(max(len(chunk), 1)))
+
+        if len(vectors) == 1:
+            return vectors[0]
+
+        merged_vector = aggregate_chunk_embeddings(vectors, weights=weights, l2_normalize=True)
+        if len(merged_vector) != self._embedding_dims:
+            raise ValueError(
+                f"Aggregated embedding dimension mismatch: got {len(merged_vector)}, expected {self._embedding_dims}."
+            )
+        return merged_vector
 
     def _upsert_entity(
         self,

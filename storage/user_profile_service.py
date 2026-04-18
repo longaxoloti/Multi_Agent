@@ -1,23 +1,12 @@
-"""
-UserProfileService — Manages user profile facts with provenance tracking.
-
-Auto-updatable: model ingests USER.md once, then freely updates based on conversations.
-Same fact_key can have multiple values in different contexts.
-Never overwrites — superseded facts keep status='superseded'.
-"""
-
 from __future__ import annotations
-
 import hashlib
 import logging
 import re
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
-
 from sqlalchemy import select, text
 from sqlalchemy.orm import Session, sessionmaker
-
 from storage.models import (
     ProfileEmbeddingORM,
     ProfileFactORM,
@@ -26,19 +15,15 @@ from storage.models import (
     _new_uuid,
     _utcnow,
 )
-from tools.knowledge.embedding_provider import embed_text_ollama
+from tools.knowledge.embedding_provider import OllamaUnavailableError, embed_text_ollama
 from main.config import KNOWLEDGE_EMBEDDING_MODEL, KNOWLEDGE_EMBEDDING_DIMS
 
 logger = logging.getLogger(__name__)
 
-
 def _content_hash(content: str) -> str:
     return hashlib.sha256(content.encode("utf-8")).hexdigest()[:64]
 
-
 class UserProfileService:
-    """Service for managing user profile information."""
-
     def __init__(
         self,
         session_factory: sessionmaker,
@@ -54,15 +39,7 @@ class UserProfileService:
         self._embedding_dims = embedding_dims
         self._is_pg = is_pg
 
-    # ------------------------------------------------------------------
-    # Ingest from USER.md
-    # ------------------------------------------------------------------
-
     def ingest_from_markdown(self, file_path: str, *, user_id: str) -> dict:
-        """
-        Parse USER.md and extract profile facts.
-        Creates a profile source + version, then extracts key-value facts.
-        """
         path = Path(file_path)
         if not path.exists():
             raise FileNotFoundError(f"Profile file not found: {file_path}")
@@ -71,7 +48,6 @@ class UserProfileService:
         content_hash = _content_hash(raw_content)
 
         with self._session_factory() as session:
-            # Check if we already ingested this exact content
             existing = session.execute(
                 select(ProfileSourceORM).where(
                     ProfileSourceORM.source_hash == content_hash,
@@ -81,8 +57,6 @@ class UserProfileService:
 
             if existing:
                 return {"action": "no_change", "source_id": existing.id}
-
-            # Create new source
             source = ProfileSourceORM(
                 id=_new_uuid(),
                 source_type="user_md",
@@ -91,10 +65,8 @@ class UserProfileService:
             session.add(source)
             session.flush()
 
-            # Extract facts from markdown
             facts = self._parse_user_md(raw_content)
             facts_created = 0
-
             for key, value in facts.items():
                 self._upsert_fact_internal(
                     session,
@@ -107,7 +79,6 @@ class UserProfileService:
                 )
                 facts_created += 1
 
-            # Create version snapshot
             latest_no = session.execute(
                 select(ProfileVersionORM.version_no).where(
                     ProfileVersionORM.user_id == user_id,
@@ -132,10 +103,6 @@ class UserProfileService:
                 "facts_created": facts_created,
             }
 
-    # ------------------------------------------------------------------
-    # Upsert fact (agent or user)
-    # ------------------------------------------------------------------
-
     def upsert_fact(
         self,
         *,
@@ -146,12 +113,6 @@ class UserProfileService:
         source: str = "inferred",
         is_sensitive: bool = False,
     ) -> dict:
-        """
-        Update or create a profile fact.
-        If same key+value exists (active), just update confidence.
-        If same key but different value, keep both (different contexts).
-        If explicitly replacing, mark old fact as 'superseded'.
-        """
         with self._session_factory() as session:
             fact_id = self._upsert_fact_internal(
                 session,
@@ -181,7 +142,6 @@ class UserProfileService:
         normalized_key = fact_key.strip().lower()
         normalized_value = fact_value.strip()
 
-        # Check if exact key+value pair already exists and is active
         existing = session.execute(
             select(ProfileFactORM).where(
                 ProfileFactORM.user_id == user_id,
@@ -192,14 +152,12 @@ class UserProfileService:
         ).scalars().first()
 
         if existing:
-            # Same fact exists — update confidence if higher
             if confidence > existing.confidence:
                 existing.confidence = confidence
                 existing.updated_at = _utcnow()
                 session.add(existing)
             return existing.id
 
-        # New fact — create it (same key can have multiple values)
         fact = ProfileFactORM(
             id=_new_uuid(),
             user_id=user_id,
@@ -215,7 +173,6 @@ class UserProfileService:
         session.add(fact)
         session.flush()
 
-        # Embed the fact for semantic search
         embed_text = f"{normalized_key}: {normalized_value}"
         try:
             vector = self._embedder(
@@ -245,10 +202,6 @@ class UserProfileService:
 
         return fact.id
 
-    # ------------------------------------------------------------------
-    # Get profile
-    # ------------------------------------------------------------------
-
     def get_profile(self, user_id: str, *, include_superseded: bool = False) -> list[dict]:
         """Get all profile facts for a user."""
         with self._session_factory() as session:
@@ -275,10 +228,6 @@ class UserProfileService:
                 for r in rows
             ]
 
-    # ------------------------------------------------------------------
-    # Search profile (semantic)
-    # ------------------------------------------------------------------
-
     def search_profile(
         self,
         user_id: str,
@@ -294,8 +243,11 @@ class UserProfileService:
             query_vector = self._embedder(
                 query, model=self._embedding_model, expected_dims=self._embedding_dims
             )
+        except OllamaUnavailableError as exc:
+            logger.warning("Skipping profile semantic search because Ollama is unavailable: %s", exc)
+            return []
         except Exception as exc:
-            logger.error("Failed to embed query for profile search: %s", exc, exc_info=True)
+            logger.warning("Failed to embed query for profile search: %s", exc)
             raise RuntimeError("Profile query embedding failed") from exc
 
         vector_literal = _to_vector_literal(query_vector)
@@ -329,10 +281,6 @@ class UserProfileService:
             for row in rows
         ]
 
-    # ------------------------------------------------------------------
-    # Mark fact as superseded
-    # ------------------------------------------------------------------
-
     def supersede_fact(self, fact_id: str, *, user_id: str) -> bool:
         """Mark a specific fact as superseded."""
         with self._session_factory() as session:
@@ -350,10 +298,6 @@ class UserProfileService:
             session.commit()
             return True
 
-    # ------------------------------------------------------------------
-    # Parser
-    # ------------------------------------------------------------------
-
     @staticmethod
     def _parse_user_md(content: str) -> dict[str, str]:
         """Extract key-value facts from USER.md markdown format."""
@@ -362,8 +306,6 @@ class UserProfileService:
             line = line.strip()
             if not line:
                 continue
-
-            # Match lines like: - **Key:** Value  or  - **Key**: Value
             match = re.match(r"^-\s*\*\*(.+?)\*\*\s*:?\s*(.+)$", line)
             if match:
                 key = match.group(1).strip().rstrip(":").lower().replace(" ", "_")
@@ -372,14 +314,12 @@ class UserProfileService:
                     facts[key] = value
                 continue
 
-            # Match lines like: - Key: value
             match = re.match(r"^-\s*(.+?):\s+(.+)$", line)
             if match:
                 key = match.group(1).strip().rstrip(":").lower().replace(" ", "_")
                 value = match.group(2).strip()
                 if value:
                     facts[key] = value
-
         return facts
 
 

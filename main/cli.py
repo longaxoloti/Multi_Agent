@@ -49,6 +49,55 @@ def _resolve_compose_command() -> list[str] | None:
     return None
 
 
+def _colima_context_name() -> str:
+    return "colima"
+
+
+def _colima_is_ready() -> bool:
+    if not _has_command("colima"):
+        return False
+
+    probe = subprocess.run(["colima", "status"], capture_output=True, text=True, check=False)
+    output = f"{probe.stdout}\n{probe.stderr}".lower()
+    return probe.returncode == 0 and "running" in output
+
+
+def _ensure_colima_running(timeout_seconds: int = 120) -> None:
+    if not _has_command("colima"):
+        raise RuntimeError("Colima is not installed. Install Colima and retry tesla start.")
+
+    if not _colima_is_ready():
+        typer.echo("Colima is not running. Starting Colima...")
+        start_result = subprocess.run(["colima", "start"], capture_output=True, text=True, check=False)
+        if start_result.returncode != 0:
+            stderr_text = (start_result.stderr or start_result.stdout or "").strip()
+            raise RuntimeError(f"Failed to start Colima: {stderr_text or 'unknown colima error'}")
+
+    deadline = time.time() + max(timeout_seconds, 0)
+    while time.time() < deadline:
+        if _colima_is_ready():
+            break
+        time.sleep(2)
+    else:
+        raise RuntimeError("Colima did not become ready in time. Please retry tesla start after Colima finishes booting.")
+
+    if _has_command("docker"):
+        context_result = subprocess.run(
+            ["docker", "context", "use", _colima_context_name()],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if context_result.returncode != 0:
+            stderr_text = (context_result.stderr or context_result.stdout or "").strip()
+            raise RuntimeError(f"Failed to switch Docker context to Colima: {stderr_text or 'unknown docker error'}")
+
+    probe = subprocess.run(["docker", "info"], capture_output=True, text=True, check=False)
+    if probe.returncode != 0:
+        stderr_text = (probe.stderr or probe.stdout or "").strip()
+        raise RuntimeError(f"Docker daemon is not available through Colima: {stderr_text or 'unknown docker error'}")
+
+
 def _ensure_local_data_dirs() -> None:
     DB_DIR.mkdir(parents=True, exist_ok=True)
     LOG_DIR.mkdir(parents=True, exist_ok=True)
@@ -65,23 +114,24 @@ def _sync_db_compose_file() -> Path | None:
 
 def _bootstrap_runtime(*, migrate: bool) -> None:
     _ensure_local_data_dirs()
+    _ensure_colima_running()
 
     compose_cmd = _resolve_compose_command()
     if compose_cmd is None:
         raise RuntimeError(
-            "No usable Docker Compose command found. Install Docker Desktop and ensure either 'docker compose' or 'docker-compose' works in PATH."
+            "No usable Docker Compose command found. Install Docker Compose and ensure either 'docker compose' or 'docker-compose' works in PATH."
         )
 
     target_dc = _sync_db_compose_file()
     if target_dc is None:
         raise RuntimeError(f"Database compose file not found at {PROJECT_ROOT / 'infra' / 'db' / 'docker-compose.yml'}")
 
-    typer.echo("Ensuring database containers are running...")
+    typer.echo("Ensuring database containers are running through Colima...")
     try:
         subprocess.run([*compose_cmd, "up", "-d"], cwd=str(DB_DIR), check=True)
     except subprocess.CalledProcessError as exc:
         raise RuntimeError(
-            "Failed to start database containers. Ensure Docker daemon is running, then retry tesla start/init."
+            "Failed to start database containers through Colima. Ensure Colima is running, then retry tesla start/init."
         ) from exc
 
     if migrate:
@@ -195,7 +245,6 @@ def _is_tesla_process(command: str) -> bool:
         "python -m main.main",
         "python -m main.cli start",
         "tesla start",
-        "com.geniuslab.tesla",
         "camofox-mcp",
         "camofox-browser",
     ]
@@ -248,14 +297,6 @@ def stop(grace: int = typer.Option(3, "--grace", min=0, help="Grace period in se
 
     stopped: list[str] = []
     skipped: list[str] = []
-
-    plist_path = USER_HOME / "Library" / "LaunchAgents" / "com.geniuslab.tesla.plist"
-    if plist_path.exists():
-        subprocess.run(["launchctl", "unload", str(plist_path)], check=False)
-        subprocess.run(["launchctl", "remove", "com.geniuslab.tesla"], check=False)
-        stopped.append("launchd service")
-    else:
-        skipped.append("launchd service (plist not found)")
 
     stop_stack_script = PROJECT_ROOT / "scripts" / "stop_stack.sh"
     if stop_stack_script.exists():
@@ -327,52 +368,14 @@ def log():
 
 @app.command()
 def daemon(action: str = typer.Argument(..., help="'install', 'start', 'stop', or 'status'")):
-    """Manage the background macOS launchd service."""
-    plist_path = USER_HOME / "Library" / "LaunchAgents" / "com.geniuslab.tesla.plist"
-    
-    if action == "install":
-        python_bin = sys.executable
-        plist_content = f"""<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-    <key>Label</key>
-    <string>com.geniuslab.tesla</string>
-    <key>ProgramArguments</key>
-    <array>
-        <string>{python_bin}</string>
-        <string>-m</string>
-        <string>main.cli</string>
-        <string>start</string>
-    </array>
-    <key>WorkingDirectory</key>
-    <string>{PROJECT_ROOT}</string>
-    <key>RunAtLoad</key>
-    <true/>
-    <key>KeepAlive</key>
-    <true/>
-    <key>StandardOutPath</key>
-    <string>{LOG_DIR}/agent.out.log</string>
-    <key>StandardErrorPath</key>
-    <string>{LOG_DIR}/agent.err.log</string>
-</dict>
-</plist>"""
-        plist_path.write_text(plist_content)
-        typer.echo(f"Installed daemon launchd plist to {plist_path}")
-
-    elif action == "start":
-        typer.echo("Starting Tesla daemon...")
-        subprocess.run(["launchctl", "load", str(plist_path)])
-    
-    elif action == "stop":
-        typer.echo("Stopping Tesla daemon...")
-        subprocess.run(["launchctl", "unload", str(plist_path)])
-
-    elif action == "status":
-        subprocess.run(["launchctl", "list", "com.geniuslab.tesla"])
-    
-    else:
-        typer.echo(f"Unknown action: {action}. Use install, start, stop, or status.", err=True)
+    """Deprecated: Tesla no longer manages launchd background services."""
+    _ = action
+    typer.echo(
+        "`tesla daemon` has been deprecated. Tesla now runs foreground-only via `tesla start` in your terminal."
+    )
+    typer.echo(
+        "If you previously installed launchd, remove it manually with: rm ~/Library/LaunchAgents/com.geniuslab.tesla.plist"
+    )
 
 @app.command()
 def version(bump: str = typer.Option(None, "--bump", help="Bump version: 'patch', 'minor', or 'major'")):

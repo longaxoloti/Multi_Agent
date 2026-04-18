@@ -17,9 +17,12 @@ from main.config import (
     KNOWLEDGE_PGVECTOR_REQUIRED,
 )
 from storage.trusted_db import TrustedDBRepository, UserKnowledgeRecord
+from rag.vector_chunking import aggregate_chunk_embeddings, chunk_text_for_embedding
 from tools.knowledge.embedding_provider import embed_text_ollama
 
 logger = logging.getLogger(__name__)
+_KNOWLEDGE_EMBEDDING_CHUNK_SIZE = 1200
+_KNOWLEDGE_EMBEDDING_CHUNK_OVERLAP = 150
 
 
 @dataclass
@@ -110,7 +113,7 @@ class KnowledgeService:
         return {
             "record_id": record_id,
             "stored_in_db": bool(record_id),
-            "stored_in_vector": bool(record_id),
+            "stored_in_vector": True,
             "category": final_category,
         }
 
@@ -236,16 +239,52 @@ class KnowledgeService:
                 f"Unsupported embedding provider '{self._embedding_provider}'. Expected 'ollama'."
             )
 
-        vector = self._embedder(
-            text,
-            model=self._embedding_model,
-            expected_dims=self._embedding_dims,
+        normalized_text = (text or "").strip()
+        if not normalized_text:
+            raise ValueError("content is empty")
+
+        chunks = chunk_text_for_embedding(
+            normalized_text,
+            chunk_size=_KNOWLEDGE_EMBEDDING_CHUNK_SIZE,
+            chunk_overlap=_KNOWLEDGE_EMBEDDING_CHUNK_OVERLAP,
         )
-        if len(vector) != self._embedding_dims:
-            raise ValueError(
-                f"Embedding dimension mismatch: got {len(vector)}, expected {self._embedding_dims}."
+        if not chunks:
+            raise ValueError("content produced no embedding chunks")
+
+        vectors: list[list[float]] = []
+        weights: list[float] = []
+
+        for idx, chunk in enumerate(chunks, 1):
+            if len(chunks) > 1:
+                logger.info(
+                    "Embedding chunk %s/%s for model=%s (chars=%s)",
+                    idx,
+                    len(chunks),
+                    self._embedding_model,
+                    len(chunk),
+                )
+
+            vector = self._embedder(
+                chunk,
+                model=self._embedding_model,
+                expected_dims=self._embedding_dims,
             )
-        return vector
+            if len(vector) != self._embedding_dims:
+                raise ValueError(
+                    f"Embedding dimension mismatch: got {len(vector)}, expected {self._embedding_dims}."
+                )
+            vectors.append(vector)
+            weights.append(float(max(len(chunk), 1)))
+
+        if len(vectors) == 1:
+            return vectors[0]
+
+        merged_vector = aggregate_chunk_embeddings(vectors, weights=weights, l2_normalize=True)
+        if len(merged_vector) != self._embedding_dims:
+            raise ValueError(
+                f"Aggregated embedding dimension mismatch: got {len(merged_vector)}, expected {self._embedding_dims}."
+            )
+        return merged_vector
 
     @staticmethod
     def _serialize_record(item: UserKnowledgeRecord) -> dict:
