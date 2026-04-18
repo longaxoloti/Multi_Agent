@@ -1,29 +1,88 @@
-# Multi Agent
+# 🤖 Tesla — Self-Hosted Agentic AI System
 
-**A self-hosted, multi-model AI agent system built with LangGraph — designed to run entirely on local hardware via Ollama, with optional cloud LLM fallback.**
+<p align="center">
+  <strong>A local-first, multi-model AI agent system — orchestrated by LangGraph, delivered through Telegram.</strong>
+</p>
 
-This project builds an autonomous agent that receives messages through Telegram, uses the Orchestrator to analyze your intent and plan multi-step work across specialized worker models, and synthesizes coherent responses — all while managing RAM on a single machine by loading one model at a time.
+<p align="center">
+  <a href="https://github.com/longaxoloti/Multi_Agent/actions"><img src="https://img.shields.io/github/actions/workflow/status/longaxoloti/Multi_Agent/ci.yml?branch=main&style=for-the-badge" alt="CI Status"></a>
+  <a href="https://github.com/longaxoloti/Multi_Agent/releases"><img src="https://img.shields.io/github/v/release/longaxoloti/Multi_Agent?include_prereleases&style=for-the-badge" alt="GitHub Release"></a>
+  <img src="https://img.shields.io/badge/Python-3.11%2B-blue?style=for-the-badge&logo=python&logoColor=white" alt="Python 3.11+">
+  <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-green.svg?style=for-the-badge" alt="MIT License"></a>
+</p>
+
+**Multi Agent** is a _self-hosted, multi-model AI agent system_ built with [LangGraph](https://github.com/langchain-ai/langgraph). It runs entirely on local hardware via [Ollama](https://ollama.com/) with optional cloud LLM fallback (Gemini, OpenAI, Anthropic).
+
+You interact with your agent through **Telegram**. The Orchestrator analyzes your intent, plans multi-step work across specialized worker models (Researcher, Reasoner), and synthesizes coherent responses — all while managing RAM on a single machine by loading one model at a time.
+
+[Getting Started](#getting-started) · [Architecture](#architecture) · [Features](#features) · [Model Routing](#model-routing) · [Research Mode](#research-mode) · [Health Check](#health-check) · [Docker](#run-with-docker) · [Presentation (VI)](PRESENTATION_MULTI_AGENT_VI.md)
 
 ---
 
-## Features
+## Highlights
 
-- **Multi-Model Orchestration** — Each task type is handled by the most suitable model:
-  - Orchestrator — Intent analysis, multi-step planning, and routing
-  - Researcher — Web research & deep reasoning
-  - Coder — Code generation & debugging
+- **[LangGraph Workflow](#architecture)** — Stateful graph pipeline with conditional routing and iterative worker loop.
+- **[Multi-Model Routing](#model-routing)** — Route each task type to the optimal model: Ollama, Gemini, OpenAI, or Anthropic.
+- **[RAM-Aware Model Swapping](#features)** — Automatically unloads the previous model before loading the next; context is serialized to JSON for seamless handoff.
+- **[Smart Web Research](#research-mode)** — Chrome CDP (primary) with Camoufox MCP fallback; human-like mouse movements, smooth scrolling, and Bezier-curve paths to bypass bot detection.
+- **[Persistent Knowledge & RAG](#knowledge-commands)** — PostgreSQL + pgvector for semantic search across your personal knowledge base.
+- **[Telegram Interface](#getting-started)** — Single-instance locking, retry with backoff, scheduled daily reports.
+- **[Airflow Reporting Pipeline](#airflow-daily-reporting)** — Automated daily briefing DAG via Apache Airflow.
 
-- **LangGraph Workflow** — A stateful graph pipeline:
-  ```
-  Request Router → Orchestrate → [Research | Coding | Reasoning | Briefing] → Orchestrator(Progress) → ... → Synthesize → END
-  ```
+---
 
-- **Smart Web Research** — Anti-detect browsing using Chrome CDP (direct control of your real browser) with fallback to Camoufox + article extraction with Crawl4AI. Includes human-like mouse movements (Bezier curves), smooth scrolling, and visual custom cursors to bypass bot detection.
-- **Workspace Priming** — Markdown-based system prompts loaded per model role, fully customizable in the `workspace/` directory
+## Architecture
 
-- **RAM-Aware Model Swapping** — Automatically unloads the previous model before loading the next, with context serialized to JSON for seamless handoff
+The system is organised into five layers:
 
-- **Telegram Bot Interface** — Single-instance locking, retry with backoff on Telegram API conflicts
+```
+┌─────────────────────────────────────────────┐
+│           Presentation Layer                │
+│    Telegram Bot  ·  CLI (tesla / Typer)     │
+├─────────────────────────────────────────────┤
+│           Orchestration Layer               │
+│  request_router → orchestrator → workers   │
+│       → synthesizer → orchestrator          │
+├────────────────────────────────────────────-┤
+│             Service Layer                   │
+│  KnowledgeService · UserProfileService      │
+│  UnifiedMemoryService · SecurityService     │
+├─────────────────────────────────────────────┤
+│             Storage Layer                   │
+│  PostgreSQL (4 schemas) + pgvector HNSW     │
+├─────────────────────────────────────────────┤
+│              Tools Layer                    │
+│  Chrome CDP · Camoufox MCP · Crawl4AI       │
+└─────────────────────────────────────────────┘
+```
+
+### Workflow Pipeline
+
+```
+Request Router → Orchestrate (PLAN)
+              → [Research | Coding | Reasoning | Briefing]
+              → Orchestrate (PROGRESS) → ... (loop)
+              → Synthesize → END
+```
+
+The **Orchestrator** runs in two phases:
+- **PLAN** — Identifies intent, topic, and search query; generates `plan_steps` and `routing_decision`.
+- **PROGRESS** — Monitors worker results; decides whether to route to the next worker or synthesize.
+
+### Key Source Files
+
+| File | Role |
+|---|---|
+| `graph/workflow.py` | StateGraph definition and route logic |
+| `graph/state.py` | `AgentState` schema |
+| `graph/nodes/*` | Worker node implementations |
+| `graph/llm_router.py` | Provider routing per task type |
+| `main/config.py` | Central env configuration |
+| `telegram_bot/bot.py` | Message handling + daily schedule |
+| `storage/models.py` | ORM models for 4 DB schemas |
+| `storage/knowledge_service.py` | Knowledge save/search/list/delete |
+| `memory/memory_manager.py` | Hybrid memory (cache + DB) |
+| `airflow/dags/` | Daily reporting DAG |
 
 ---
 
@@ -45,29 +104,39 @@ conda activate multi-agent
 
 ### 3. Configure Environment Variables
 
+```bash
+cp .env.example .env
+```
+
 Edit `.env` and fill in:
-- `TELEGRAM_BOT_TOKEN` — Your Telegram bot token from [@BotFather](https://t.me/BotFather)
+- `TELEGRAM_BOT_TOKEN` — Your bot token from [@BotFather](https://t.me/BotFather)
 - `TELEGRAM_USER_ID` — Your Telegram user ID
-- API keys for cloud LLM providers (optional)
-- Database URL (optional)
+- API keys for cloud LLM providers *(optional)*
+- Database URL *(optional — defaults to local Postgres)*
 
 ### 4. Run the Agent
 
 ```bash
-# Start the Telegram bot (default mode)
+# Start Telegram bot only (default)
 ./main/run.sh
 
-# Or start the full stack (bot + Airflow + crawler)
+# Start full stack: bot + Airflow + crawler
 ./main/run.sh stack
 
-# Or start only Airflow scheduler
+# Start Airflow scheduler only
 ./main/run.sh airflow
 ```
 
-### 4.1 Run with Docker
+### 5. Talk to Your Agent
+
+Open Telegram, find your bot, and send `/start`.
+
+---
+
+## Run with Docker
 
 ```bash
-cp .env.example .env  # or create .env manually if you do not have .env.example
+cp .env.example .env   # or create .env manually
 
 # Build and start bot + Postgres
 docker compose up -d --build
@@ -78,68 +147,110 @@ docker compose logs -f multi-agent
 
 Default container command runs the Telegram bot via `python -m main.main`.
 
-### 5. Talk to Your Agent
-
-Open Telegram, find your bot, and send `/start`.
-
----
-
-### Model Routing
-
-You can override which provider handles each task type:
-
-```env
-MODEL_RESEARCH      # Research tasks
-MODEL_CODE          # Coding tasks
-MODEL_CHAT          # Direct chat
-MODEL_ORCHESTRATOR
-```
-
-Set any of these to `gemini`, `openai`, `anthropic`, or `ollama` if you want to self-host.
-
 ---
 
 ## Health Check
 
+Run a prestart validation to verify your environment, provider routes, and Ollama models:
+
 ```bash
-# Prestart validation (env + provider routes + Ollama models)
 python scripts/health_check.py --prestart
 ```
 
 ---
 
-## Chrome CDP Research Mode (Primary)
+## Model Routing
 
-The agent now defaults to using Chrome CDP to control your real, daily-use browser. This approach bypasses Google's bot detection 100% by utilizing your real IP, established Cookies/Account history, and injecting human-like browser interactions (smooth scrolling, Bezier-curve mouse paths, and custom visual cursor).
+Override which provider handles each task type via environment variables:
 
-### Setup
+```env
+MODEL_ORCHESTRATOR   # Orchestration and planning
+MODEL_RESEARCH       # Research tasks
+MODEL_CODE           # Coding tasks
+MODEL_CHAT           # Direct chat / reasoning
+```
 
-1. Completely close Google Chrome on your machine.
-2. Watch the agent create a new tab, navigate, smoothly scroll, move its own injected custom red cursor arrow, and click links autonomously.
+Supported providers: `ollama` · `gemini` · `openai` · `anthropic`
+
+The router includes a **fallback mechanism** — if the primary provider is unavailable, it automatically switches to the next configured provider.
 
 ---
 
-## CamoFox MCP Research Mode (Fallback)
+## Features
 
-If Chrome CDP is unavailable, the agent will fall back to using `camofox-mcp`.
+### Knowledge Commands
 
-### Required Components
+Interact with your personal knowledge base directly in Telegram chat:
 
-1. `camofox-browser` must be reachable (`/health` on port `9377` by default).
-2. `camofox-mcp` transport can be:
-  - `stdio` (default): spawned by Python MCP client.
-  - `http`: started as a background process by `scripts/start_camoufox.sh`.
+| Command | Action |
+|---|---|
+| `/save <category> <content>` | Save a knowledge entry |
+| `/get <id>` | Retrieve a record by ID |
+| `/search <query>` | Semantic search via embedding |
+| `/list` | List recent entries |
+| `/delete <id>` | Delete a record |
+| `/profile` | View, search, or ingest your profile |
 
-### MCP Environment Variables
+### Memory & Context Management
 
-Add/update these in `.env`:
+- **In-memory cache** for fast conversation lookup during a session.
+- **Persistent flush** to `system.conversation_sessions` table.
+- Configurable conversation history window (`MAX_CONVERSATION_HISTORY`).
+- **Session serialization to JSON** for seamless context handoff between model swaps.
+
+### RAG & Knowledge Persistence
+
+- `KnowledgeService` generates embeddings and stores them in **PostgreSQL/pgvector**.
+- Deduplication for `web_news` entries (by source + content hash).
+- Top-k semantic retrieval by vector distance.
+- Metadata support for filtering and source attribution.
+
+### Storage Architecture (4 Schemas)
+
+| Schema | Purpose |
+|---|---|
+| `system` | Audit logs, conversation sessions |
+| `profile` | User facts and profile embeddings |
+| `knowledge` | User knowledge, entities, memory embeddings |
+| `security` | Policies and secret references (deny-by-default) |
+
+### Airflow Daily Reporting
+
+- DAG `daily_user_knowledge_report` runs on a cron schedule.
+- Triggers a research workflow for the configured data interval.
+- Sends a summarized report to your Telegram.
+- Deduplicates and persists `web_news` sources.
+
+---
+
+## Research Mode
+
+### Chrome CDP (Primary)
+
+The agent defaults to Chrome CDP — controlling your real, daily-use browser. This approach bypasses bot detection by using your real IP, established cookies/account history, and injecting human-like browser interactions:
+
+- Smooth Bezier-curve mouse paths
+- Smooth scrolling
+- Injected custom visual cursor
+
+**Setup:** Completely close Google Chrome before starting the agent. It will open and control a new tab autonomously.
+
+### Camoufox MCP (Fallback)
+
+If Chrome CDP is unavailable, the agent falls back to `camofox-mcp`.
+
+**Required:**
+1. `camofox-browser` reachable at `/health` on port `9377` (default).
+2. MCP transport configured: `stdio` (default, spawned per session) or `http` (background process via `scripts/start_camoufox.sh`).
+
+**MCP Environment Variables:**
 
 ```env
-# Browser server URL (used by both app and camofox-mcp)
+# Browser server URL
 CAMOFOX_URL=http://127.0.0.1:9377
 CAMOUFOX_API_URL=http://127.0.0.1:9377
 
-# MCP transport: stdio|http
+# MCP transport: stdio | http
 CAMOFOX_MCP_TRANSPORT=stdio
 
 # For stdio spawn
@@ -149,7 +260,7 @@ CAMOFOX_MCP_ARGS=-y camofox-mcp@latest
 # For HTTP mode
 CAMOFOX_MCP_URL=http://127.0.0.1:3000/mcp
 
-# Optional auth passthrough
+# Optional auth
 CAMOFOX_API_KEY=
 
 # MCP client runtime
@@ -158,17 +269,92 @@ CAMOFOX_MCP_MAX_RETRIES=2
 CAMOFOX_MCP_RETRY_BACKOFF_SECONDS=1.0
 ```
 
-### Verify MCP Setup
+**Verify MCP Setup:**
 
 ```bash
-# Browser health
+# Check browser health
 curl -fsS http://127.0.0.1:9377/health
 
-# MCP smoke (server_status -> create_tab -> navigate/snapshot -> close_tab)
+# Run e2e MCP smoke test (server_status → create_tab → navigate/snapshot → close_tab)
 python scripts/e2e_mcp_workflow_smoke.py
 ```
 
-### Startup Behavior
+**Startup Behavior:**
+- `stdio` mode: `start_camoufox.sh` starts only `camofox-browser`; MCP server is spawned per Python session.
+- `http` mode: `start_camoufox.sh` starts both `camofox-browser` and `camofox-mcp`, with PID/log files in `data/logs`.
 
-- `CAMOFOX_MCP_TRANSPORT=stdio`: `start_camoufox.sh` starts only `camofox-browser`; MCP server process is spawned per Python session.
-- `CAMOFOX_MCP_TRANSPORT=http`: `start_camoufox.sh` starts both `camofox-browser` and `camofox-mcp` background process, with PID/log files in `data/logs`.
+---
+
+## CLI (tesla)
+
+The `tesla` CLI manages the agent lifecycle:
+
+```bash
+tesla init    # Initialize configuration
+tesla start   # Start the agent
+tesla stop    # Stop the agent
+```
+
+Install with: `pip install -e .`
+
+---
+
+## Tech Stack
+
+| Technology | Role |
+|---|---|
+| [LangGraph](https://github.com/langchain-ai/langgraph) | Stateful agent orchestration |
+| [LangChain](https://www.langchain.com/) | Unified LLM provider interface |
+| [Ollama](https://ollama.com/) | Local model serving (self-hosted) |
+| [PostgreSQL](https://www.postgresql.org/) + [pgvector](https://github.com/pgvector/pgvector) | Relational + vector storage (HNSW) |
+| [Apache Airflow](https://airflow.apache.org/) | Scheduled reporting pipeline |
+| [python-telegram-bot](https://python-telegram-bot.org/) | Telegram interface |
+| [Crawl4AI](https://github.com/unclecode/crawl4ai) | Web content extraction |
+| [Alembic](https://alembic.sqlalchemy.org/) | Database schema migrations |
+| [Docker](https://www.docker.com/) | Infrastructure (DB + services) |
+
+---
+
+## Development
+
+### Running Tests
+
+```bash
+pytest tests/
+```
+
+### E2E Smoke Tests
+
+```bash
+# Multi-agent workflow: CHAT, RESEARCH, CODING cases
+python scripts/e2e_workflow_smoke.py
+
+# MCP browser pipeline
+python scripts/e2e_mcp_workflow_smoke.py
+```
+
+### Project Structure
+
+```
+Multi_Agent/
+├── graph/          # LangGraph workflow, state, nodes, router
+├── main/           # Entry point, config, CLI, run script
+├── telegram_bot/   # Bot handlers and scheduler
+├── storage/        # ORM models and service layer
+├── memory/         # Hybrid memory manager
+├── tools/          # Browser automation, crawlers
+├── rag/            # Retrieval-augmented generation utilities
+├── pipelines/      # Data ingestion pipelines
+├── airflow/        # Airflow DAGs
+├── scripts/        # Health checks and smoke tests
+├── tests/          # Test suite
+├── infra/          # Docker Compose for DB services
+├── workspace/      # Role-specific system prompt files
+└── data/           # Runtime data, logs, session files
+```
+
+---
+
+## License
+
+[MIT](LICENSE)
