@@ -41,7 +41,7 @@ The system is organised into five layers:
 │    Telegram Bot  ·  CLI (tesla / Typer)     │
 ├─────────────────────────────────────────────┤
 │           Orchestration Layer               │
-│  request_router → orchestrator → workers   │
+│  request_router → orchestrator → workers    │
 │       → synthesizer → orchestrator          │
 ├────────────────────────────────────────────-┤
 │             Service Layer                   │
@@ -60,13 +60,13 @@ The system is organised into five layers:
 
 ```
 Request Router → Orchestrate (PLAN)
-              → [Research | Coding | Reasoning | Briefing]
-              → Orchestrate (PROGRESS) → ... (loop)
-              → Synthesize → END
+               → [Research | Coding | Reasoning | Briefing]
+               → Orchestrate (PROGRESS) → ... (loop)
+               → Synthesize → END
 ```
 
 The **Orchestrator** runs in two phases:
-- **PLAN** — Identifies intent, topic, and search query; generates `plan_steps` and `routing_decision`.
+- **PLAN**     — Identifies intent, topic, and search query; generates `plan_steps` and `routing_decision`.
 - **PROGRESS** — Monitors worker results; decides whether to route to the next worker or synthesize.
 
 ### Key Source Files
