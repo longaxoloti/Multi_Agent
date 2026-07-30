@@ -1,6 +1,5 @@
 # Ignore environment files
 .env
-.env.example
 
 # Ignore other files
 config.py

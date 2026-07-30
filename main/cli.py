@@ -4,6 +4,9 @@ import subprocess
 import sys
 import time
 from pathlib import Path
+from urllib.parse import urlparse
+
+import httpx
 
 import typer
 
@@ -17,6 +20,10 @@ LOG_DIR = APP_DIR / "logs"
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
 from main import __version__
+from main.config import OLLAMA_BASE_URL, OLLAMA_ENABLED
+
+OLLAMA_PID_FILE = LOG_DIR / "ollama.pid"
+OLLAMA_BOOT_LOG_FILE = LOG_DIR / "ollama.log"
 
 
 def _has_command(name: str) -> bool:
@@ -103,6 +110,128 @@ def _ensure_local_data_dirs() -> None:
     LOG_DIR.mkdir(parents=True, exist_ok=True)
 
 
+def _ollama_health_url() -> str:
+    base = (OLLAMA_BASE_URL or "http://127.0.0.1:11434").rstrip("/")
+    return f"{base}/api/tags"
+
+
+def _ollama_is_reachable(timeout_seconds: float = 2.0) -> bool:
+    try:
+        with httpx.Client(timeout=timeout_seconds) as client:
+            resp = client.get(_ollama_health_url())
+            return resp.status_code < 400
+    except Exception:
+        return False
+
+
+def _read_pid_from_file(pid_file: Path) -> int | None:
+    if not pid_file.exists():
+        return None
+    try:
+        raw = pid_file.read_text().strip()
+    except OSError:
+        return None
+    if raw.isdigit():
+        return int(raw)
+    return None
+
+
+def _collect_ollama_server_pids() -> list[int]:
+    result = subprocess.run(
+        ["ps", "-axo", "pid=,command="],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if result.returncode != 0:
+        return []
+
+    pids: list[int] = []
+    for line in result.stdout.splitlines():
+        row = line.strip()
+        if not row:
+            continue
+        parts = row.split(maxsplit=1)
+        if len(parts) != 2 or not parts[0].isdigit():
+            continue
+        pid = int(parts[0])
+        cmd = parts[1].lower()
+        if "ollama serve" in cmd:
+            pids.append(pid)
+    return pids
+
+
+def _wait_for_ollama_ready(timeout_seconds: int = 25) -> bool:
+    deadline = time.time() + max(timeout_seconds, 0)
+    while time.time() < deadline:
+        if _ollama_is_reachable():
+            return True
+        time.sleep(1)
+    return False
+
+
+def _start_ollama_if_needed() -> None:
+    if not OLLAMA_ENABLED:
+        return
+    if _ollama_is_reachable():
+        typer.echo("Ollama is already running.")
+        return
+
+    if not _has_command("ollama"):
+        raise RuntimeError(
+            "Ollama is enabled but 'ollama' command is not available. Install Ollama or set OLLAMA_ENABLED=false."
+        )
+
+    _ensure_local_data_dirs()
+    typer.echo("Ollama is not reachable. Starting ollama service...")
+
+    with OLLAMA_BOOT_LOG_FILE.open("a", encoding="utf-8") as logf:
+        process = subprocess.Popen(
+            ["ollama", "serve"],
+            stdout=logf,
+            stderr=subprocess.STDOUT,
+            cwd=str(PROJECT_ROOT),
+            start_new_session=True,
+        )
+
+    OLLAMA_PID_FILE.write_text(str(process.pid))
+    if not _wait_for_ollama_ready(timeout_seconds=30):
+        try:
+            os.kill(process.pid, signal.SIGTERM)
+        except OSError:
+            pass
+        raise RuntimeError(
+            "Started 'ollama serve' but endpoint did not become ready in time. Check ~/.tesla/logs/ollama.log."
+        )
+
+    parsed = urlparse((OLLAMA_BASE_URL or "").strip() or "http://127.0.0.1:11434")
+    host = parsed.hostname or "127.0.0.1"
+    port = parsed.port or (443 if parsed.scheme == "https" else 80)
+    typer.secho(f"Ollama started and reachable at {host}:{port}.", fg=typer.colors.GREEN)
+
+
+def _stop_ollama_service(grace_seconds: int = 3) -> tuple[int, int]:
+    targets: set[int] = set()
+
+    pid_from_file = _read_pid_from_file(OLLAMA_PID_FILE)
+    if pid_from_file:
+        targets.add(pid_from_file)
+
+    for pid in _collect_ollama_server_pids():
+        targets.add(pid)
+
+    stopped = 0
+    for pid in sorted(targets):
+        ok, reason = _terminate_pid(pid, grace_seconds=grace_seconds)
+        if ok or reason in {"not running", "killed"}:
+            stopped += 1
+
+    if OLLAMA_PID_FILE.exists():
+        OLLAMA_PID_FILE.unlink(missing_ok=True)
+
+    return stopped, len(targets)
+
+
 def _sync_db_compose_file() -> Path | None:
     source_dc = PROJECT_ROOT / "infra" / "db" / "docker-compose.yml"
     if not source_dc.exists():
@@ -170,6 +299,7 @@ def start():
     """Start the foreground agent process."""
     typer.echo("Starting Tesla Agent...")
     _bootstrap_runtime(migrate=False)
+    _start_ollama_if_needed()
     # Delay import to avoid loading everything on fast CLI commands
     from main.main import main
     main()
@@ -321,6 +451,13 @@ def stop(grace: int = typer.Option(3, "--grace", min=0, help="Grace period in se
             stopped.append("database containers")
         else:
             skipped.append("database containers (compose not found)")
+
+        if OLLAMA_ENABLED:
+            ollama_stopped, ollama_targets = _stop_ollama_service(grace_seconds=grace)
+            if ollama_targets > 0:
+                stopped.append(f"ollama service ({ollama_stopped}/{ollama_targets} process(es))")
+            else:
+                skipped.append("ollama service (no running ollama serve process found)")
 
     pid_targets: set[int] = set()
     for pid_file in _iter_tesla_pid_files():
